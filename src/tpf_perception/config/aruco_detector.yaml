@@ -1,0 +1,32 @@
+﻿aruco_detector_node:
+  ros__parameters:
+    # Topics in the downloaded TurtleBot4 RosBags.
+    image_topic: /tb4_0/oakd/rgb/preview/image_raw
+    camera_info_topic: /tb4_0/oakd/rgb/preview/camera_info
+
+    # Outputs for the next SLAM phase.
+    detections_topic: /aruco/detections
+    poses_topic: /aruco/poses
+    markers_topic: /aruco/markers
+    debug_image_topic: /aruco/debug_image
+
+    # Start with the common small dictionary. If detections are empty, try other
+    # DICT_* names supported by OpenCV, e.g. DICT_5X5_100 or DICT_6X6_250.
+    aruco_dictionary: DICT_4X4_50
+
+    # From data/calibration/README.md, TurtleBot 4 number 0.
+    marker_size_m: 0.0889
+    use_static_calibration: true
+    camera_matrix: [203.14, 0.0, 122.57, 0.0, 361.13, 123.33, 0.0, 0.0, 1.0]
+    dist_coeffs: [-0.9904393553733826, -47.16939926147461, -0.0007601691759191453, -0.00031758102704770863, 306.0343933105469]
+
+    # Debugging / robustness knobs.
+    publish_debug_image: true
+    draw_axes: true
+    axis_length_m: 0.05
+    corner_refinement: true
+    min_marker_perimeter_rate: 0.02
+    max_marker_perimeter_rate: 4.0
+    adaptive_thresh_win_size_min: 3
+    adaptive_thresh_win_size_max: 23
+    adaptive_thresh_win_size_step: 10

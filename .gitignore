@@ -5,3 +5,7 @@ log/
 
 # Large local RosBag payloads. Keep metadata.yaml and README files versionable.
 data/rosbags/**/*.db3
+
+# Python cache
+__pycache__/
+*.py[cod]
