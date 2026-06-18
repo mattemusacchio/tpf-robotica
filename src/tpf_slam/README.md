@@ -152,3 +152,51 @@ Resultado validado:
 - `/map` publicado con `frame_id: map`.
 - resolución `0.08`.
 - dimensiones `238 x 233`.
+
+## Demo progresiva en ROS/RViz
+
+Para ver el mapa crecer como video sin esperar a un SLAM online completo, el
+paquete incluye un nodo de demo que lee internamente el bag `laberinto`, usa la
+trayectoria optimizada offline y publica el mapa de ocupacion incrementalmente.
+
+```bash
+source install/setup.bash
+ros2 launch tpf_slam progressive_mapping_demo.launch.py rviz:=true
+```
+
+Topicos publicados:
+
+- `/map` (`nav_msgs/OccupancyGrid`): mapa incremental con QoS transient local.
+- `/slam/demo_path` (`nav_msgs/Path`): trayectoria optimizada recorrida hasta el
+  scan actual.
+- `/slam/demo_landmarks` (`visualization_msgs/MarkerArray`): landmarks ArUco
+  optimizados con etiquetas de ID.
+- `/slam/demo_status` (`std_msgs/String`): JSON con scans procesados, rayos
+  validos, dimensiones del mapa y transformada laser usada.
+
+Parametros utiles:
+
+```bash
+ros2 launch tpf_slam progressive_mapping_demo.launch.py \
+  rviz:=true \
+  playback_rate_hz:=12.0 \
+  scan_stride:=20 \
+  beam_stride:=10
+```
+
+Por defecto el demo usa la transformada laser del bag ya validada
+(`base_link -> rplidar_link`: `x=-0.04`, `y=0.0`, `yaw=1.5708`) como
+parametros para arrancar rapido. Si se quiere releer `/tb4_0/tf_static` desde
+el `.db3`, lanzar con `use_tf_static:=true`.
+
+Para una prueba rapida sin RViz:
+
+```bash
+ros2 launch tpf_slam progressive_mapping_demo.launch.py \
+  playback_rate_hz:=0.0 \
+  max_processed_scans:=40
+```
+
+Esta opcion es una superficie de visualizacion/reproduccion: no re-optimiza el
+grafo en vivo, sino que muestra progresivamente como los scans del rosbag se
+integran contra la trayectoria ya optimizada.

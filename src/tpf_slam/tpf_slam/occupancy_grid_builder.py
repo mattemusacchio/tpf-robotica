@@ -334,7 +334,10 @@ class OccupancyGridBuilder:
         tf_topic_id, tf_type = int(tf_topic[0]), str(tf_topic[1])
         tf_msg_type = get_message(tf_type)
         transforms: dict[tuple[str, str], tuple[float, float, float]] = {}
-        for (data,) in connection.execute('SELECT data FROM messages WHERE topic_id = ? ORDER BY timestamp, id', (tf_topic_id,)):
+        for (data,) in connection.execute(
+            'SELECT data FROM messages WHERE topic_id = ? ORDER BY timestamp, id LIMIT 50',
+            (tf_topic_id,),
+        ):
             tf_msg = deserialize_message(data, tf_msg_type)
             for transform in tf_msg.transforms:
                 parent = normalize_frame(transform.header.frame_id)
