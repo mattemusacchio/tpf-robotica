@@ -98,3 +98,37 @@ Validación actual con el bag completo `laberinto` usando `--image-stride 50`:
 - Costo inicial `3126.09`, costo final `1804.04`, reducción aproximada `42.3%`.
 
 El solver puede reportar `success=false` si llega a `max_nfev`, pero el JSON incluye `solver.usable_solution=true` cuando la solución reduce el costo y es finita.
+## Mapa de ocupación offline
+
+Con el grafo optimizado del laberinto se puede construir un mapa de ocupación desde `/tb4_0/scan`:
+
+```bash
+ros2 run tpf_slam occupancy_grid_builder \
+  --bag data/rosbags/laberinto \
+  --optimized-graph log/laberinto_optimized_graph.json \
+  --output-dir log/maps \
+  --map-name laberinto_map \
+  --resolution 0.08 \
+  --max-range-m 5.0 \
+  --scan-stride 10 \
+  --beam-stride 5
+```
+
+Exporta:
+
+- `log/maps/laberinto_map.pgm`: mapa ROS occupancy-grid.
+- `log/maps/laberinto_map.yaml`: metadata compatible con ROS map server.
+- `log/maps/laberinto_map.png`: vista rápida con trayectoria y landmarks dibujados.
+- `log/maps/optimized_trajectory.csv`: trayectoria usada.
+- `log/maps/optimized_landmarks.json`: landmarks usados.
+- `log/maps/laberinto_map_summary.json`: parámetros y estadísticas.
+
+Validación actual con `laberinto`:
+
+- `1080` scans procesados de `10797` (`--scan-stride 10`).
+- `139857` rayos válidos.
+- resolución `0.08 m/celda`.
+- mapa `238 x 233` celdas.
+- paredes/pasillos visibles en el PNG de debug.
+
+Limitación: todavía se asume `rplidar_link` aproximadamente centrado/alineado con la pose odométrica. Para mejorar precisión, el próximo refinamiento es usar TF estático/dinámico para transformar LIDAR a base.

@@ -27,6 +27,7 @@ setup(
             'graph_slam_frontend_node = tpf_slam.graph_slam_frontend_node:main',
             'graph_slam_backend = tpf_slam.graph_slam_backend:main',
             'offline_rosbag_graph_builder = tpf_slam.offline_rosbag_graph_builder:main',
+            'occupancy_grid_builder = tpf_slam.occupancy_grid_builder:main',
         ],
     },
 )
