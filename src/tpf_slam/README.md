@@ -43,5 +43,58 @@ ros2 bag play data/rosbags/aruco_estimation
 ## Limitaciones actuales
 
 - Usa el frame de odometría como aproximación de `map`.
-- La posición global del landmark es una inicialización por promedio, no una optimización.
-- No hay back-end Graph SLAM todavía; el próximo paso es optimizar este grafo.
+- La posición global inicial del landmark se calcula por promedio antes de pasar al back-end.
+- El back-end actual es offline; todavía falta publicar la trayectoria optimizada como nodo ROS para RViz/mapa.
+
+## Back-end offline
+
+Una vez generado `log/slam_frontend_graph.json`, optimizar offline con:
+
+```bash
+ros2 run tpf_slam graph_slam_backend \
+  --input log/slam_frontend_graph.json \
+  --output log/slam_optimized_graph.json
+```
+
+Exporta:
+
+- `log/slam_optimized_graph.json`: grafo con poses y landmarks optimizados.
+- `log/optimized_trajectory.csv`: trayectoria optimizada.
+- `log/optimized_landmarks.csv`: landmarks optimizados.
+
+El solver fija la primera pose como ancla de gauge y minimiza:
+
+- error odométrico entre keyframes consecutivos;
+- error visual de rango/bearing desde keyframes hacia landmarks.
+
+Usa `scipy.optimize.least_squares` si está disponible en el entorno ROS.
+## Extracción offline desde RosBag
+
+Para bags grandes como `laberinto`, reproducir en tiempo real puede ser lento. El extractor offline lee el `.db3` directamente, procesa una muestra distribuida de imágenes y arma el mismo grafo:
+
+```bash
+ros2 run tpf_slam offline_rosbag_graph_builder \
+  --bag data/rosbags/laberinto \
+  --output log/laberinto_frontend_graph.json \
+  --image-stride 50 \
+  --progress-interval 200
+```
+
+Luego optimizar:
+
+```bash
+ros2 run tpf_slam graph_slam_backend \
+  --input log/laberinto_frontend_graph.json \
+  --output log/laberinto_optimized_graph.json \
+  --max-iterations 200
+```
+
+Validación actual con el bag completo `laberinto` usando `--image-stride 50`:
+
+- `737` keyframes.
+- `50` landmarks ArUco.
+- `736` aristas odométricas.
+- `768` aristas visuales.
+- Costo inicial `3126.09`, costo final `1804.04`, reducción aproximada `42.3%`.
+
+El solver puede reportar `success=false` si llega a `max_nfev`, pero el JSON incluye `solver.usable_solution=true` cuando la solución reduce el costo y es finita.

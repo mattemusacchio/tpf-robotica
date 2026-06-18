@@ -291,8 +291,10 @@ class GraphSlamFrontendNode(Node):
         )
         if self.keyframes:
             previous = self.keyframes[-1]
-            dx = keyframe.x - previous.x
-            dy = keyframe.y - previous.y
+            global_dx = keyframe.x - previous.x
+            global_dy = keyframe.y - previous.y
+            dx = cos(previous.theta) * global_dx + sin(previous.theta) * global_dy
+            dy = -sin(previous.theta) * global_dx + cos(previous.theta) * global_dy
             dtheta = normalize_angle(keyframe.theta - previous.theta)
             self.odom_edges.append(
                 OdometryEdge(
@@ -301,7 +303,7 @@ class GraphSlamFrontendNode(Node):
                     dx=dx,
                     dy=dy,
                     dtheta=dtheta,
-                    distance=hypot(dx, dy),
+                    distance=hypot(global_dx, global_dy),
                 )
             )
         self.keyframes.append(keyframe)
