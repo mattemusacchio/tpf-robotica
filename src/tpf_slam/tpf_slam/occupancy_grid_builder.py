@@ -21,6 +21,9 @@ from .graph_slam_frontend_node import normalize_angle
 @dataclass(frozen=True)
 class MappingConfig:
     scan_topic: str = '/tb4_0/scan'
+    tf_static_topic: str = '/tb4_0/tf_static'
+    base_frame: str = 'base_link'
+    use_tf_static: bool = True
     resolution: float = 0.05
     margin_m: float = 1.0
     max_range_m: float = 6.0
@@ -33,6 +36,8 @@ class MappingConfig:
     log_odds_max: float = 4.0
     occupied_threshold: float = 0.65
     free_threshold: float = 0.35
+    min_occupied_component_cells: int = 3
+    inflate_radius_m: float = 0.15
     laser_x_m: float = 0.0
     laser_y_m: float = 0.0
     laser_yaw_rad: float = 0.0
@@ -102,6 +107,10 @@ class OccupancyGridBuilder:
         self.origin_x, self.origin_y, self.width, self.height = self._grid_geometry()
         self.log_odds = np.zeros((self.height, self.width), dtype=np.float32)
         self.touched = np.zeros((self.height, self.width), dtype=bool)
+        self.laser_x_m = config.laser_x_m
+        self.laser_y_m = config.laser_y_m
+        self.laser_yaw_rad = config.laser_yaw_rad
+        self.laser_transform_source = 'parameters'
         self.stats = {
             'scan_messages': 0,
             'processed_scans': 0,
@@ -129,6 +138,13 @@ class OccupancyGridBuilder:
             'stats': self.stats,
             'trajectory_keyframes': len(self.trajectory.poses),
             'landmarks': len(self.landmarks),
+            'laser_transform': {
+                'source': self.laser_transform_source,
+                'base_frame': self.config.base_frame,
+                'x': self.laser_x_m,
+                'y': self.laser_y_m,
+                'yaw': self.laser_yaw_rad,
+            },
         }
 
     def export(self, output_dir: Path, map_name: str) -> dict[str, str]:
@@ -187,6 +203,7 @@ class OccupancyGridBuilder:
                 raise KeyError(f'Scan topic {self.config.scan_topic!r} not found in {db3_file}')
             topic_id, topic_type = int(topic[0]), str(topic[1])
             scan_type = get_message(topic_type)
+            self._load_laser_transform_if_available(connection, scan_type, topic_id)
             self.stats['scan_messages'] += int(connection.execute('SELECT COUNT(*) FROM messages WHERE topic_id=?', (topic_id,)).fetchone()[0])
             query = '''
                 SELECT timestamp, data
@@ -208,8 +225,8 @@ class OccupancyGridBuilder:
         pose = self.trajectory.at(float(scan.header.stamp.sec) + 1e-9 * float(scan.header.stamp.nanosec))
         laser_cos = math.cos(pose.theta)
         laser_sin = math.sin(pose.theta)
-        laser_x = pose.x + laser_cos * self.config.laser_x_m - laser_sin * self.config.laser_y_m
-        laser_y = pose.y + laser_sin * self.config.laser_x_m + laser_cos * self.config.laser_y_m
+        laser_x = pose.x + laser_cos * self.laser_x_m - laser_sin * self.laser_y_m
+        laser_y = pose.y + laser_sin * self.laser_x_m + laser_cos * self.laser_y_m
         start_cell = self._world_to_grid(laser_x, laser_y)
         if start_cell is None:
             return
@@ -223,7 +240,7 @@ class OccupancyGridBuilder:
                 continue
             hit_is_valid = raw_range <= min(float(scan.range_max), self.config.max_range_m)
             ray_range = min(raw_range, self.config.max_range_m)
-            angle = pose.theta + self.config.laser_yaw_rad + float(scan.angle_min) + index * float(scan.angle_increment)
+            angle = pose.theta + self.laser_yaw_rad + float(scan.angle_min) + index * float(scan.angle_increment)
             end_x = laser_x + ray_range * math.cos(angle)
             end_y = laser_y + ray_range * math.sin(angle)
             end_cell = self._world_to_grid(end_x, end_y)
@@ -269,7 +286,69 @@ class OccupancyGridBuilder:
         occupancy[self.touched & (probability >= self.config.occupied_threshold)] = 100
         known_mid = self.touched & (occupancy < 0)
         occupancy[known_mid] = np.clip((probability[known_mid] * 100.0).astype(np.int16), 1, 99)
+        occupancy = self._clean_and_inflate(occupancy)
         return occupancy
+
+    def _clean_and_inflate(self, occupancy: np.ndarray) -> np.ndarray:
+        cleaned = occupancy.copy()
+        occupied = (cleaned >= 100).astype(np.uint8)
+
+        if self.config.min_occupied_component_cells > 1 and occupied.any():
+            component_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(occupied, connectivity=8)
+            filtered = np.zeros_like(occupied)
+            for label in range(1, component_count):
+                area = int(stats[label, cv2.CC_STAT_AREA])
+                if area >= self.config.min_occupied_component_cells:
+                    filtered[labels == label] = 1
+            removed = (occupied == 1) & (filtered == 0)
+            cleaned[removed & self.touched] = 0
+            occupied = filtered
+
+        inflate_cells = int(math.ceil(self.config.inflate_radius_m / self.config.resolution))
+        if inflate_cells > 0 and occupied.any():
+            kernel_size = 2 * inflate_cells + 1
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+            inflated = cv2.dilate(occupied, kernel, iterations=1).astype(bool)
+            cleaned[inflated] = 100
+        return cleaned
+
+    def _load_laser_transform_if_available(self, connection: sqlite3.Connection, scan_type: Any, scan_topic_id: int) -> None:
+        if not self.config.use_tf_static or self.laser_transform_source == 'tf_static':
+            return
+        first_scan = connection.execute(
+            'SELECT data FROM messages WHERE topic_id = ? ORDER BY timestamp, id LIMIT 1',
+            (scan_topic_id,),
+        ).fetchone()
+        if first_scan is None:
+            return
+        scan_msg = deserialize_message(first_scan[0], scan_type)
+        scan_frame = normalize_frame(scan_msg.header.frame_id)
+        base_frame = normalize_frame(self.config.base_frame)
+
+        tf_topic = connection.execute(
+            'SELECT id, type FROM topics WHERE name = ?',
+            (self.config.tf_static_topic,),
+        ).fetchone()
+        if tf_topic is None:
+            return
+        tf_topic_id, tf_type = int(tf_topic[0]), str(tf_topic[1])
+        tf_msg_type = get_message(tf_type)
+        transforms: dict[tuple[str, str], tuple[float, float, float]] = {}
+        for (data,) in connection.execute('SELECT data FROM messages WHERE topic_id = ? ORDER BY timestamp, id', (tf_topic_id,)):
+            tf_msg = deserialize_message(data, tf_msg_type)
+            for transform in tf_msg.transforms:
+                parent = normalize_frame(transform.header.frame_id)
+                child = normalize_frame(transform.child_frame_id)
+                translation = transform.transform.translation
+                rotation = transform.transform.rotation
+                yaw = quaternion_to_yaw(float(rotation.x), float(rotation.y), float(rotation.z), float(rotation.w))
+                transforms[(parent, child)] = (float(translation.x), float(translation.y), yaw)
+
+        resolved = resolve_transform_2d(transforms, base_frame, scan_frame)
+        if resolved is None:
+            return
+        self.laser_x_m, self.laser_y_m, self.laser_yaw_rad = resolved
+        self.laser_transform_source = f'tf_static:{base_frame}->{scan_frame}'
 
     def _pgm_image(self, occupancy: np.ndarray) -> np.ndarray:
         image = np.full((self.height, self.width), 205, dtype=np.uint8)
@@ -329,6 +408,74 @@ def bresenham(x0: int, y0: int, x1: int, y1: int) -> list[tuple[int, int]]:
     return cells
 
 
+def normalize_frame(frame: str) -> str:
+    """Normalize TF frame names for bag lookups."""
+
+    return frame.strip().lstrip('/')
+
+
+def quaternion_to_yaw(x: float, y: float, z: float, w: float) -> float:
+    """Return planar yaw from a quaternion."""
+
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def compose_transform_2d(
+    first: tuple[float, float, float],
+    second: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    """Compose 2D transforms T_ac = T_ab * T_bc."""
+
+    x1, y1, yaw1 = first
+    x2, y2, yaw2 = second
+    c1 = math.cos(yaw1)
+    s1 = math.sin(yaw1)
+    return (
+        x1 + c1 * x2 - s1 * y2,
+        y1 + s1 * x2 + c1 * y2,
+        normalize_angle(yaw1 + yaw2),
+    )
+
+
+def invert_transform_2d(transform: tuple[float, float, float]) -> tuple[float, float, float]:
+    """Invert a 2D transform."""
+
+    x, y, yaw = transform
+    c = math.cos(yaw)
+    s = math.sin(yaw)
+    return (-c * x - s * y, s * x - c * y, normalize_angle(-yaw))
+
+
+def resolve_transform_2d(
+    transforms: dict[tuple[str, str], tuple[float, float, float]],
+    source: str,
+    target: str,
+) -> tuple[float, float, float] | None:
+    """Resolve a source->target transform through a static TF tree."""
+
+    if source == target:
+        return (0.0, 0.0, 0.0)
+
+    adjacency: dict[str, list[tuple[str, tuple[float, float, float]]]] = {}
+    for (parent, child), transform in transforms.items():
+        adjacency.setdefault(parent, []).append((child, transform))
+        adjacency.setdefault(child, []).append((parent, invert_transform_2d(transform)))
+
+    queue: list[tuple[str, tuple[float, float, float]]] = [(source, (0.0, 0.0, 0.0))]
+    visited = {source}
+    while queue:
+        frame, accumulated = queue.pop(0)
+        for next_frame, edge_transform in adjacency.get(frame, []):
+            if next_frame in visited:
+                continue
+            next_transform = compose_transform_2d(accumulated, edge_transform)
+            if next_frame == target:
+                return next_transform
+            visited.add(next_frame)
+            queue.append((next_frame, next_transform))
+    return None
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='Build an occupancy grid from optimized SLAM graph and rosbag2 LaserScan.')
     parser.add_argument('--bag', required=True)
@@ -340,6 +487,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--scan-stride', type=int, default=1)
     parser.add_argument('--beam-stride', type=int, default=2)
     parser.add_argument('--margin-m', type=float, default=1.0)
+    parser.add_argument('--inflate-radius-m', type=float, default=0.15)
+    parser.add_argument('--min-occupied-component-cells', type=int, default=3)
+    parser.add_argument('--no-tf-static', action='store_true', help='Disable static TF lookup and use laser_* parameters.')
     return parser
 
 
@@ -350,6 +500,9 @@ def config_from_args(args: argparse.Namespace) -> MappingConfig:
         scan_stride=max(1, int(args.scan_stride)),
         beam_stride=max(1, int(args.beam_stride)),
         margin_m=args.margin_m,
+        inflate_radius_m=max(0.0, args.inflate_radius_m),
+        min_occupied_component_cells=max(0, int(args.min_occupied_component_cells)),
+        use_tf_static=not args.no_tf_static,
     )
 
 

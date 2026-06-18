@@ -131,4 +131,24 @@ Validación actual con `laberinto`:
 - mapa `238 x 233` celdas.
 - paredes/pasillos visibles en el PNG de debug.
 
-Limitación: todavía se asume `rplidar_link` aproximadamente centrado/alineado con la pose odométrica. Para mejorar precisión, el próximo refinamiento es usar TF estático/dinámico para transformar LIDAR a base.
+El mapper lee `/tb4_0/tf_static` y aplica la transformada `base_link -> rplidar_link` detectada en el bag. En `laberinto`, la transformada usada fue `x=-0.04 m`, `y=0.0 m`, `yaw=1.5708 rad`.
+### Validación con Nav2 map_server
+
+El mapa exportado fue probado con `nav2_map_server`:
+
+```bash
+ros2 run nav2_map_server map_server \
+  --ros-args -p yaml_filename:=/mnt/c/Users/Matteo/Documents/workspace/facultad/cuarto/robotica/tpf-robotica/log/maps/laberinto_map.yaml
+
+ros2 lifecycle set /map_server configure
+ros2 lifecycle set /map_server activate
+ros2 topic echo /map --once --qos-durability transient_local --qos-reliability reliable
+```
+
+Resultado validado:
+
+- lifecycle `configure`: OK.
+- lifecycle `activate`: OK.
+- `/map` publicado con `frame_id: map`.
+- resolución `0.08`.
+- dimensiones `238 x 233`.
