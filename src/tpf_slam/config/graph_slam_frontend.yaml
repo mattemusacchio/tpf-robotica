@@ -1,0 +1,25 @@
+graph_slam_frontend_node:
+  ros__parameters:
+    odom_topic: /tb4_0/odom
+    detections_topic: /aruco/detections
+
+    graph_topic: /slam/graph_snapshot
+    keyframes_topic: /slam/keyframes
+    landmarks_topic: /slam/landmarks
+    graph_edges_topic: /slam/graph_edges
+    map_frame: map
+
+    # Keyframe policy. The max period keeps an inspectable graph even if the
+    # robot is nearly static during the short ArUco calibration bag.
+    min_keyframe_translation_m: 0.20
+    min_keyframe_rotation_rad: 0.35
+    max_keyframe_period_sec: 2.0
+
+    # Observation thinning avoids adding one visual edge for every camera frame.
+    min_observation_interval_sec: 0.25
+    max_detection_sync_age_sec: 0.35
+    max_odom_buffer_size: 500
+    max_landmark_range_m: 4.0
+
+    publish_period_sec: 1.0
+    graph_output_path: log/slam_frontend_graph.json
