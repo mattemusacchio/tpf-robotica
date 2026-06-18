@@ -29,6 +29,15 @@ class CameraCalibration:
     source: str
 
 
+@dataclass(frozen=True)
+class ArucoDetectionBackend:
+    """OpenCV ArUco detector objects for both old and new Python APIs."""
+
+    dictionary: Any
+    parameters: Any
+    detector: Any | None
+
+
 class ArucoDetectorNode(Node):
     """Detect ArUco tags in TurtleBot camera frames.
 
@@ -134,7 +143,7 @@ class ArucoDetectorNode(Node):
             source='static_parameters',
         )
 
-    def _create_detector(self) -> cv2.aruco.ArucoDetector:
+    def _create_detector(self) -> ArucoDetectionBackend:
         dictionary_name = str(self.get_parameter('aruco_dictionary').value)
         dictionary_id = getattr(cv2.aruco, dictionary_name, None)
         if dictionary_id is None:
@@ -142,7 +151,10 @@ class ArucoDetectorNode(Node):
             raise ValueError(f'Unknown ArUco dictionary {dictionary_name!r}. Valid examples: {valid_names[:8]}')
 
         dictionary = cv2.aruco.getPredefinedDictionary(dictionary_id)
-        parameters = cv2.aruco.DetectorParameters()
+        if hasattr(cv2.aruco, 'DetectorParameters'):
+            parameters = cv2.aruco.DetectorParameters()
+        else:
+            parameters = cv2.aruco.DetectorParameters_create()
         parameters.minMarkerPerimeterRate = float(self.get_parameter('min_marker_perimeter_rate').value)
         parameters.maxMarkerPerimeterRate = float(self.get_parameter('max_marker_perimeter_rate').value)
         parameters.adaptiveThreshWinSizeMin = int(self.get_parameter('adaptive_thresh_win_size_min').value)
@@ -150,7 +162,21 @@ class ArucoDetectorNode(Node):
         parameters.adaptiveThreshWinSizeStep = int(self.get_parameter('adaptive_thresh_win_size_step').value)
         if bool(self.get_parameter('corner_refinement').value):
             parameters.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
-        return cv2.aruco.ArucoDetector(dictionary, parameters)
+
+        detector_cls = getattr(cv2.aruco, 'ArucoDetector', None)
+        detector = detector_cls(dictionary, parameters) if detector_cls is not None else None
+        return ArucoDetectionBackend(dictionary=dictionary, parameters=parameters, detector=detector)
+
+    def _detect_markers(self, gray_image: np.ndarray) -> tuple[Any, Any, Any]:
+        """Detect markers using the OpenCV API available on this ROS install."""
+
+        if self.detector.detector is not None:
+            return self.detector.detector.detectMarkers(gray_image)
+        return cv2.aruco.detectMarkers(
+            gray_image,
+            self.detector.dictionary,
+            parameters=self.detector.parameters,
+        )
 
     def _on_camera_info(self, msg: CameraInfo) -> None:
         if not any(msg.k):
@@ -165,10 +191,10 @@ class ArucoDetectorNode(Node):
         )
 
     def _calibration(self) -> CameraCalibration | None:
-        if self.latest_camera_info_calibration is not None:
-            return self.latest_camera_info_calibration
         if self.use_static_calibration:
             return self.static_calibration
+        if self.latest_camera_info_calibration is not None:
+            return self.latest_camera_info_calibration
         return None
 
     def _on_image(self, msg: Image) -> None:
@@ -184,7 +210,7 @@ class ArucoDetectorNode(Node):
             return
 
         gray = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2GRAY)
-        corners, ids, _rejected = self.detector.detectMarkers(gray)
+        corners, ids, _rejected = self._detect_markers(gray)
 
         annotated = bgr_image.copy()
         detections: list[dict[str, Any]] = []
@@ -324,4 +350,3 @@ def main(args: list[str] | None = None) -> None:
 
 if __name__ == '__main__':
     main()
-

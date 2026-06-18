@@ -47,7 +47,7 @@ El default del YAML usa TurtleBot 0, indicado por la cátedra:
 - `MARKER_SIZE_M = 0.0889`
 - matriz intrínseca y distorsión documentadas en `data/calibration/README.md`
 
-El nodo prioriza `/camera_info` si llega. Si no llega todavía, usa la calibración estática del YAML (`use_static_calibration: true`).
+Por defecto usa la calibración estática del YAML (`use_static_calibration: true`), que coincide con las distancias esperadas del bag de calibración. Si se configura `use_static_calibration: false`, usa `/camera_info`.
 
 ## Validación esperada con `aruco_estimation`
 
