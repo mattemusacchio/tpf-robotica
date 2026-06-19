@@ -106,7 +106,7 @@ class ArucoDetectorNode(Node):
         self.debug_image_pub = self.create_publisher(
             Image,
             str(self.get_parameter('debug_image_topic').value),
-            QoSProfile(depth=2, reliability=ReliabilityPolicy.BEST_EFFORT),
+            QoSProfile(depth=2, reliability=ReliabilityPolicy.RELIABLE),
         )
 
         self.create_subscription(
