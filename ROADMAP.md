@@ -432,3 +432,22 @@ El trabajo está en buen estado cuando pueden mostrar:
 - máquina de estados documentada;
 - slides listas con videos/evidencia;
 - informe con análisis técnico y sim-to-real.
+
+
+## Estado actualizado Parte A
+
+Parte A opcion 3 queda cerrada como flujo batch/offline sobre RosBag, alineado con la consigna:
+
+- detector ArUco validado con `aruco_estimation`;
+- Graph SLAM obligatorio sobre `laberinto` con odometria + observaciones ArUco;
+- trayectoria corregida exportada y publicada como `/belief` en el demo final;
+- landmarks publicados como `/landmarks`;
+- keyframes/nodos publicados como `/poses_guardadas`;
+- mapa de ocupacion publicado como `/map` y exportado como YAML/PGM/PNG;
+- reporte de calidad en `log/part_a/part_a_summary.json` con evidencia de reobservaciones/loop closure y reduccion de costo.
+
+Launch final de defensa Parte A:
+
+```bash
+ros2 launch tpf_slam part_a_graph_slam_demo.launch.py rviz:=true
+```

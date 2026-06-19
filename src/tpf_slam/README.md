@@ -200,3 +200,80 @@ ros2 launch tpf_slam progressive_mapping_demo.launch.py \
 Esta opcion es una superficie de visualizacion/reproduccion: no re-optimiza el
 grafo en vivo, sino que muestra progresivamente como los scans del rosbag se
 integran contra la trayectoria ya optimizada.
+
+
+## Cierre Parte A segun consigna
+
+Para defender la Parte A opcion 3, usar el launch final:
+
+```bash
+source install/setup.bash
+ros2 launch tpf_slam part_a_graph_slam_demo.launch.py rviz:=true
+```
+
+Topicos alineados con la consigna:
+
+- `/map` (`nav_msgs/OccupancyGrid`): grilla de ocupacion resultante.
+- `/belief` (`nav_msgs/Path`): trayectoria corregida/optimizada por Graph SLAM.
+- `/landmarks` (`visualization_msgs/MarkerArray`): ArUco landmarks optimizados con etiquetas de ID.
+- `/poses_guardadas` (`geometry_msgs/PoseArray`): keyframes/nodos del grafo.
+- `/slam/part_a_status` (`std_msgs/String`): resumen JSON de grafo, scans y mapa.
+
+La opcion 3 de la consigna pide Graph SLAM obligatorio con ArUco sobre RosBag. El flujo implementado queda:
+
+1. detectar ArUco y caracterizar mediciones con `aruco_estimation`;
+2. construir el grafo de poses/landmarks desde `laberinto`;
+3. optimizar el grafo offline;
+4. reproducir/procesar LIDAR con la trayectoria corregida para generar `/map`;
+5. mostrar en RViz `/belief`, `/landmarks`, `/poses_guardadas` y `/map`.
+
+### Reporte de calidad y loop closure
+
+Generar un reporte reproducible con:
+
+```bash
+ros2 run tpf_slam slam_quality_report \
+  --frontend-graph log/laberinto_frontend_graph.json \
+  --optimized-graph log/laberinto_optimized_graph.json \
+  --map-summary log/maps/laberinto_map_summary.json \
+  --output log/part_a/part_a_summary.json
+```
+
+El reporte incluye cantidad de keyframes, landmarks, aristas odometricas, aristas visuales, reduccion de costo del solver y evidencia de cierre de lazo por reobservacion de IDs ArUco desde multiples keyframes.
+
+### Checklist de regeneracion Parte A
+
+```bash
+# 1) Construir grafo inicial desde el rosbag largo.
+ros2 run tpf_slam offline_rosbag_graph_builder \
+  --bag data/rosbags/laberinto \
+  --output log/laberinto_frontend_graph.json \
+  --image-stride 50 \
+  --progress-interval 200
+
+# 2) Optimizar trayectoria y landmarks con Graph SLAM.
+ros2 run tpf_slam graph_slam_backend \
+  --input log/laberinto_frontend_graph.json \
+  --output log/laberinto_optimized_graph.json \
+  --max-iterations 200
+
+# 3) Proyectar LIDAR usando la trayectoria corregida.
+ros2 run tpf_slam occupancy_grid_builder \
+  --bag data/rosbags/laberinto \
+  --optimized-graph log/laberinto_optimized_graph.json \
+  --output-dir log/maps \
+  --map-name laberinto_map \
+  --resolution 0.08 \
+  --max-range-m 5.0 \
+  --scan-stride 10 \
+  --beam-stride 5 \
+  --inflate-radius-m 0.08 \
+  --min-occupied-component-cells 4
+
+# 4) Emitir reporte de defensa.
+ros2 run tpf_slam slam_quality_report \
+  --frontend-graph log/laberinto_frontend_graph.json \
+  --optimized-graph log/laberinto_optimized_graph.json \
+  --map-summary log/maps/laberinto_map_summary.json \
+  --output log/part_a/part_a_summary.json
+```

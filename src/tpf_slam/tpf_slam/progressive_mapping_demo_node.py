@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import rclpy
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import Pose, PoseArray, PoseStamped
 from nav_msgs.msg import OccupancyGrid, Path as PathMsg
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -40,6 +40,7 @@ class ProgressiveMappingDemoNode(Node):
         self.declare_parameter('map_topic', '/map')
         self.declare_parameter('path_topic', '/slam/demo_path')
         self.declare_parameter('landmarks_topic', '/slam/demo_landmarks')
+        self.declare_parameter('poses_topic', '/poses_guardadas')
         self.declare_parameter('status_topic', '/slam/demo_status')
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('resolution', 0.08)
@@ -73,9 +74,11 @@ class ProgressiveMappingDemoNode(Node):
         self.map_pub = self.create_publisher(OccupancyGrid, str(self.get_parameter('map_topic').value), map_qos)
         self.path_pub = self.create_publisher(PathMsg, str(self.get_parameter('path_topic').value), map_qos)
         self.landmarks_pub = self.create_publisher(MarkerArray, str(self.get_parameter('landmarks_topic').value), map_qos)
+        self.poses_pub = self.create_publisher(PoseArray, str(self.get_parameter('poses_topic').value), map_qos)
         self.status_pub = self.create_publisher(String, str(self.get_parameter('status_topic').value), map_qos)
 
         self.builder = self._create_builder()
+        self.graph_metrics = self._load_graph_metrics()
         self.create_timer(1.0, self._publish_static_overlays)
         self.worker = threading.Thread(target=self._run_demo_loop, daemon=True)
         self.worker.start()
@@ -114,6 +117,19 @@ class ProgressiveMappingDemoNode(Node):
             Path(str(self.get_parameter('optimized_graph_path').value)),
             config,
         )
+
+    def _load_graph_metrics(self) -> dict[str, Any]:
+        graph_path = Path(str(self.get_parameter('optimized_graph_path').value))
+        graph = json.loads(graph_path.read_text(encoding='utf-8'))
+        keyframes = graph.get('optimized_keyframes') or graph.get('keyframes') or []
+        landmarks = graph.get('optimized_landmarks') or graph.get('landmarks') or []
+        return {
+            'keyframes': len(keyframes),
+            'landmarks': len(landmarks),
+            'odom_edges': len(graph.get('odom_edges', [])),
+            'visual_edges': len(graph.get('visual_edges', [])),
+            'solver': graph.get('solver', {}),
+        }
 
     def _run_demo_loop(self) -> None:
         while not self.stop_event.is_set():
@@ -177,6 +193,7 @@ class ProgressiveMappingDemoNode(Node):
     def _publish_static_overlays(self) -> None:
         self._publish_path()
         self._publish_landmarks()
+        self._publish_saved_poses()
         self._publish_status(done=self.done)
 
     def _publish_all(self, force: bool = False) -> None:
@@ -185,6 +202,7 @@ class ProgressiveMappingDemoNode(Node):
         self._publish_map()
         self._publish_path()
         self._publish_landmarks()
+        self._publish_saved_poses()
         self._publish_status(done=self.done)
 
     def _publish_map(self) -> None:
@@ -223,6 +241,20 @@ class ProgressiveMappingDemoNode(Node):
             stamped.pose.orientation.w = float(math.cos(half_yaw))
             msg.poses.append(stamped)
         self.path_pub.publish(msg)
+
+    def _publish_saved_poses(self) -> None:
+        msg = PoseArray()
+        msg.header.frame_id = self.map_frame
+        msg.header.stamp = self.get_clock().now().to_msg()
+        for pose in self.builder.trajectory.poses:
+            pose_msg = Pose()
+            pose_msg.position.x = pose.x
+            pose_msg.position.y = pose.y
+            half_yaw = 0.5 * pose.theta
+            pose_msg.orientation.z = float(math.sin(half_yaw))
+            pose_msg.orientation.w = float(math.cos(half_yaw))
+            msg.poses.append(pose_msg)
+        self.poses_pub.publish(msg)
 
     def _publish_landmarks(self) -> None:
         marker_array = MarkerArray()
@@ -282,6 +314,7 @@ class ProgressiveMappingDemoNode(Node):
             'map_width': self.builder.width,
             'map_height': self.builder.height,
             'laser_transform': self.builder.summary()['laser_transform'],
+            'graph': self.graph_metrics,
         }
         if error:
             payload['error'] = error

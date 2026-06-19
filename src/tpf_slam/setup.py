@@ -13,9 +13,13 @@ setup(
             'launch/graph_slam_frontend.launch.py',
             'launch/aruco_graph_frontend.launch.py',
             'launch/progressive_mapping_demo.launch.py',
+            'launch/part_a_graph_slam_demo.launch.py',
         ]),
         ('share/' + package_name + '/config', ['config/graph_slam_frontend.yaml']),
-        ('share/' + package_name + '/rviz', ['rviz/progressive_mapping_demo.rviz']),
+        ('share/' + package_name + '/rviz', [
+            'rviz/progressive_mapping_demo.rviz',
+            'rviz/part_a_graph_slam.rviz',
+        ]),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -31,6 +35,7 @@ setup(
             'offline_rosbag_graph_builder = tpf_slam.offline_rosbag_graph_builder:main',
             'occupancy_grid_builder = tpf_slam.occupancy_grid_builder:main',
             'progressive_mapping_demo_node = tpf_slam.progressive_mapping_demo_node:main',
+            'slam_quality_report = tpf_slam.slam_quality_report:main',
         ],
     },
 )
