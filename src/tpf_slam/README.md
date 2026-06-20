@@ -108,11 +108,18 @@ ros2 run tpf_slam occupancy_grid_builder \
   --optimized-graph log/laberinto_optimized_graph.json \
   --output-dir log/maps \
   --map-name laberinto_map \
-  --resolution 0.08 \
+  --resolution 0.05 \
   --max-range-m 5.0 \
-  --scan-stride 10 \
-  --beam-stride 5
+  --beam-stride 1 \
+  --inflate-radius-m 0.06 \
+  --no-tf-static --laser-x-m -0.04 --laser-yaw-rad 1.5707963267948966
 ```
+
+> Importante: el láser de este bag está montado a `yaw = pi/2`. Si se usa
+> `--no-tf-static`, hay que pasar `--laser-yaw-rad 1.5707963267948966` (y
+> `--laser-x-m -0.04`); de lo contrario los scans quedan rotados 90° y las
+> paredes salen dobladas. Sin `--no-tf-static`, el mapper resuelve la
+> transformada desde `/tb4_0/tf_static`.
 
 Exporta:
 

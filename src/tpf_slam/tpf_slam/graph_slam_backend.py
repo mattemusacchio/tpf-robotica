@@ -40,12 +40,20 @@ def normalize_angle(angle: float) -> float:
 
 @dataclass(frozen=True)
 class BackendConfig:
-    odom_translation_sigma: float = 0.05
-    odom_rotation_sigma: float = 0.08
-    visual_range_sigma: float = 0.12
-    visual_bearing_sigma: float = 0.08
-    max_iterations: int = 80
-    loss: str = 'soft_l1'
+    # Wheel/IMU odometry on this platform is locally very accurate, so it is the
+    # backbone of the graph. ArUco range/bearing is noisier and has gross outliers
+    # (180-degree flips, far/oblique misreads), so it is down-weighted and tamed by
+    # a robust loss instead of being allowed to warp the trajectory.
+    odom_translation_sigma: float = 0.03
+    odom_rotation_sigma: float = 0.03
+    visual_range_sigma: float = 0.40
+    visual_bearing_sigma: float = 0.30
+    # LiDAR scan-matching (ICP) pose-pose constraints: reliable geometry, trusted
+    # almost as much as odometry and used for loop closures.
+    icp_translation_sigma: float = 0.05
+    icp_rotation_sigma: float = 0.04
+    max_iterations: int = 150
+    loss: str = 'cauchy'
     f_scale: float = 1.0
 
 
@@ -67,6 +75,7 @@ class GraphSlamBackend:
         self.keyframes = sorted(graph.get('keyframes', []), key=lambda item: int(item['id']))
         self.landmarks = sorted(graph.get('landmarks', []), key=lambda item: int(item['id']))
         self.odom_edges = graph.get('odom_edges', [])
+        self.icp_edges = graph.get('icp_edges', [])
         self.visual_edges = graph.get('visual_edges', [])
         if not self.keyframes:
             raise ValueError('Graph has no keyframes')
@@ -123,6 +132,7 @@ class GraphSlamBackend:
                 'keyframes': len(optimized_keyframes),
                 'landmarks': len(optimized_landmarks),
                 'odom_edges': len(self.odom_edges),
+                'icp_edges': len(self.icp_edges),
                 'visual_edges': len(self.visual_edges),
             },
             'initial_keyframes': self.keyframes,
@@ -130,6 +140,7 @@ class GraphSlamBackend:
             'optimized_keyframes': optimized_keyframes,
             'optimized_landmarks': optimized_landmarks,
             'odom_edges': self.odom_edges,
+            'icp_edges': self.icp_edges,
             'visual_edges': self.visual_edges,
             'residual_summary': self._residual_summary(optimized_state),
         }
@@ -142,22 +153,12 @@ class GraphSlamBackend:
         landmark_by_id = self._landmark_dict(state)
 
         for edge in self.odom_edges:
-            from_id = int(edge['from_id'])
-            to_id = int(edge['to_id'])
-            if from_id not in pose_by_id or to_id not in pose_by_id:
-                continue
-            x_i, y_i, theta_i = pose_by_id[from_id]
-            x_j, y_j, theta_j = pose_by_id[to_id]
-            dx_global = x_j - x_i
-            dy_global = y_j - y_i
-            pred_dx = cos(theta_i) * dx_global + sin(theta_i) * dy_global
-            pred_dy = -sin(theta_i) * dx_global + cos(theta_i) * dy_global
-            pred_dtheta = normalize_angle(theta_j - theta_i)
-            residuals.extend([
-                (pred_dx - float(edge.get('dx', 0.0))) / self.config.odom_translation_sigma,
-                (pred_dy - float(edge.get('dy', 0.0))) / self.config.odom_translation_sigma,
-                normalize_angle(pred_dtheta - float(edge.get('dtheta', 0.0))) / self.config.odom_rotation_sigma,
-            ])
+            residuals.extend(self._pose_pose_residual(
+                edge, pose_by_id, self.config.odom_translation_sigma, self.config.odom_rotation_sigma))
+
+        for edge in self.icp_edges:
+            residuals.extend(self._pose_pose_residual(
+                edge, pose_by_id, self.config.icp_translation_sigma, self.config.icp_rotation_sigma))
 
         for edge in self.visual_edges:
             keyframe_id = int(edge['keyframe_id'])
@@ -177,17 +178,43 @@ class GraphSlamBackend:
 
         return np.asarray(residuals, dtype=float)
 
+    def _pose_pose_residual(
+        self,
+        edge: dict[str, Any],
+        pose_by_id: dict[int, tuple[float, float, float]],
+        translation_sigma: float,
+        rotation_sigma: float,
+    ) -> list[float]:
+        """Weighted residual for a relative pose-pose constraint (odom or ICP)."""
+
+        from_id = int(edge['from_id'])
+        to_id = int(edge['to_id'])
+        if from_id not in pose_by_id or to_id not in pose_by_id:
+            return []
+        x_i, y_i, theta_i = pose_by_id[from_id]
+        x_j, y_j, theta_j = pose_by_id[to_id]
+        dx_global = x_j - x_i
+        dy_global = y_j - y_i
+        pred_dx = cos(theta_i) * dx_global + sin(theta_i) * dy_global
+        pred_dy = -sin(theta_i) * dx_global + cos(theta_i) * dy_global
+        pred_dtheta = normalize_angle(theta_j - theta_i)
+        return [
+            (pred_dx - float(edge.get('dx', 0.0))) / translation_sigma,
+            (pred_dy - float(edge.get('dy', 0.0))) / translation_sigma,
+            normalize_angle(pred_dtheta - float(edge.get('dtheta', 0.0))) / rotation_sigma,
+        ]
+
     def jacobian_sparsity(self) -> Any:
         """Return residual-variable sparsity for scalable finite differences."""
 
         if lil_matrix is None or self.layout.size == 0:
             return None
 
-        residual_rows = len(self.odom_edges) * 3 + len(self.visual_edges) * 2
+        residual_rows = (len(self.odom_edges) + len(self.icp_edges)) * 3 + len(self.visual_edges) * 2
         sparsity = lil_matrix((residual_rows, self.layout.size), dtype=int)
         row = 0
 
-        for edge in self.odom_edges:
+        for edge in (*self.odom_edges, *self.icp_edges):
             from_id = int(edge['from_id'])
             to_id = int(edge['to_id'])
             columns: list[int] = []
@@ -303,14 +330,15 @@ class GraphSlamBackend:
         pose_by_id = self._pose_dict(state)
         landmark_by_id = self._landmark_dict(state)
         odom_norms: list[float] = []
+        icp_norms: list[float] = []
         visual_range_errors: list[float] = []
         visual_bearing_errors: list[float] = []
 
-        for edge in self.odom_edges:
+        def edge_abs_error(edge: dict[str, Any]) -> float | None:
             from_id = int(edge['from_id'])
             to_id = int(edge['to_id'])
             if from_id not in pose_by_id or to_id not in pose_by_id:
-                continue
+                return None
             x_i, y_i, theta_i = pose_by_id[from_id]
             x_j, y_j, theta_j = pose_by_id[to_id]
             dx_global = x_j - x_i
@@ -318,7 +346,18 @@ class GraphSlamBackend:
             pred_dx = cos(theta_i) * dx_global + sin(theta_i) * dy_global
             pred_dy = -sin(theta_i) * dx_global + cos(theta_i) * dy_global
             pred_dtheta = normalize_angle(theta_j - theta_i)
-            odom_norms.append(hypot(pred_dx - float(edge.get('dx', 0.0)), pred_dy - float(edge.get('dy', 0.0))) + abs(normalize_angle(pred_dtheta - float(edge.get('dtheta', 0.0)))))
+            return hypot(pred_dx - float(edge.get('dx', 0.0)), pred_dy - float(edge.get('dy', 0.0))) + abs(
+                normalize_angle(pred_dtheta - float(edge.get('dtheta', 0.0))))
+
+        for edge in self.odom_edges:
+            value = edge_abs_error(edge)
+            if value is not None:
+                odom_norms.append(value)
+
+        for edge in self.icp_edges:
+            value = edge_abs_error(edge)
+            if value is not None:
+                icp_norms.append(value)
 
         for edge in self.visual_edges:
             keyframe_id = int(edge['keyframe_id'])
@@ -334,6 +373,7 @@ class GraphSlamBackend:
 
         return {
             'odom_abs_error_mean': _mean_abs(odom_norms),
+            'icp_abs_error_mean': _mean_abs(icp_norms),
             'visual_range_error_mean_m': _mean_abs(visual_range_errors),
             'visual_range_error_max_m': _max_abs(visual_range_errors),
             'visual_bearing_error_mean_rad': _mean_abs(visual_bearing_errors),
@@ -376,6 +416,8 @@ def load_config(args: argparse.Namespace) -> BackendConfig:
         odom_rotation_sigma=args.odom_rotation_sigma,
         visual_range_sigma=args.visual_range_sigma,
         visual_bearing_sigma=args.visual_bearing_sigma,
+        icp_translation_sigma=args.icp_translation_sigma,
+        icp_rotation_sigma=args.icp_rotation_sigma,
         max_iterations=args.max_iterations,
         loss=args.loss,
         f_scale=args.f_scale,
@@ -396,12 +438,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='Optimize a tpf_slam front-end graph snapshot offline.')
     parser.add_argument('--input', default='log/slam_frontend_graph.json', help='Input front-end graph JSON path.')
     parser.add_argument('--output', default='log/slam_optimized_graph.json', help='Output optimized graph JSON path.')
-    parser.add_argument('--odom-translation-sigma', type=float, default=0.05)
-    parser.add_argument('--odom-rotation-sigma', type=float, default=0.08)
-    parser.add_argument('--visual-range-sigma', type=float, default=0.12)
-    parser.add_argument('--visual-bearing-sigma', type=float, default=0.08)
-    parser.add_argument('--max-iterations', type=int, default=80)
-    parser.add_argument('--loss', default='soft_l1')
+    parser.add_argument('--odom-translation-sigma', type=float, default=0.03)
+    parser.add_argument('--odom-rotation-sigma', type=float, default=0.03)
+    parser.add_argument('--visual-range-sigma', type=float, default=0.40)
+    parser.add_argument('--visual-bearing-sigma', type=float, default=0.30)
+    parser.add_argument('--icp-translation-sigma', type=float, default=0.05)
+    parser.add_argument('--icp-rotation-sigma', type=float, default=0.04)
+    parser.add_argument('--max-iterations', type=int, default=150)
+    parser.add_argument('--loss', default='cauchy')
     parser.add_argument('--f-scale', type=float, default=1.0)
     return parser
 
