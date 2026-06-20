@@ -31,21 +31,47 @@ from .graph_slam_frontend_node import (
     stamp_to_sec,
     yaw_from_quaternion,
 )
+from .icp import icp_match, scan_to_points
 
 
 @dataclass(frozen=True)
 class OfflineBuilderConfig:
     odom_topic: str = '/tb4_0/odom'
     image_topic: str = '/tb4_0/oakd/rgb/preview/image_raw'
+    scan_topic: str = '/tb4_0/scan'
     aruco_dictionary: str = 'DICT_4X4_50'
     marker_size_m: float = 0.0889
     camera_matrix: tuple[float, ...] = (203.14, 0.0, 122.57, 0.0, 361.13, 123.33, 0.0, 0.0, 1.0)
     dist_coeffs: tuple[float, ...] = (-0.9904393553733826, -47.16939926147461, -0.0007601691759191453, -0.00031758102704770863, 306.0343933105469)
+    # Keyframes are sampled by distance/rotation travelled. The time fallback is
+    # large so that standing still does not spawn redundant nodes.
     min_keyframe_translation_m: float = 0.20
     min_keyframe_rotation_rad: float = 0.35
-    max_keyframe_period_sec: float = 2.0
+    max_keyframe_period_sec: float = 8.0
     min_observation_interval_sec: float = 0.25
-    max_landmark_range_m: float = 4.0
+    max_landmark_range_m: float = 3.0
+    # ArUco outlier gating: drop observations whose implied landmark position jumps
+    # far from the running estimate (180-degree flips, misreads), and drop landmarks
+    # seen too few times to be trustworthy.
+    max_landmark_jump_m: float = 0.6
+    min_landmark_observations: int = 3
+    # LiDAR scan-matching constraints.
+    enable_icp: bool = True
+    icp_max_range_m: float = 5.0
+    icp_beam_stride: int = 1
+    laser_x_m: float = -0.04
+    laser_y_m: float = 0.0
+    laser_yaw_rad: float = 1.5707963267948966
+    loop_closure_radius_m: float = 1.2
+    loop_closure_min_index_gap: int = 25
+    loop_closure_min_fitness: float = 0.55
+    loop_closure_max_mean_error_m: float = 0.10
+    loop_closure_max_per_keyframe: int = 1
+    # Reject loop closures whose ICP estimate disagrees grossly with the odometry
+    # prior. Wheel/IMU odometry here has low global drift, so a true revisit should
+    # roughly match the odometry-composed relative pose; a large mismatch signals a
+    # perceptual-aliasing false match (look-alike corridor).
+    loop_closure_max_odom_disagreement_m: float = 0.5
     image_stride: int = 3
     max_images: int = 0
     progress_interval: int = 1000
@@ -63,15 +89,21 @@ class OfflineRosbagGraphBuilder:
         self.dist_coeffs = np.asarray(config.dist_coeffs, dtype=np.float64)
 
         self.latest_pose: RobotPose2D | None = None
+        self.latest_scan_points: np.ndarray | None = None
         self.keyframes: list[KeyframeNode] = []
+        self.keyframe_scans: dict[int, np.ndarray] = {}
         self.landmarks: dict[int, LandmarkNode] = {}
         self.odom_edges: list[OdometryEdge] = []
+        self.icp_edges: list[dict[str, Any]] = []
         self.visual_edges: list[VisualEdge] = []
         self.last_observation_by_key: dict[tuple[int, int], float] = {}
         self.image_count = 0
+        self.scan_count = 0
         self.processed_image_count = 0
         self.detection_frame_count = 0
         self.odom_count = 0
+        self.rejected_observations = 0
+        self.icp_stats = {'sequential': 0, 'loop_closures': 0, 'loop_candidates': 0}
 
     def build(self) -> dict[str, Any]:
         db3_files = sorted(self.bag_path.glob('*.db3')) if self.bag_path.is_dir() else [self.bag_path]
@@ -79,7 +111,80 @@ class OfflineRosbagGraphBuilder:
             raise FileNotFoundError(f'No .db3 files found in {self.bag_path}')
         for db3_file in db3_files:
             self._build_from_sqlite_db(db3_file)
+        if self.config.enable_icp:
+            self._build_icp_edges()
         return self.snapshot()
+
+    def _relative_pose(self, a: KeyframeNode, b: KeyframeNode) -> tuple[float, float, float]:
+        """Pose of keyframe ``b`` expressed in keyframe ``a``'s frame (odom prior)."""
+
+        global_dx = b.x - a.x
+        global_dy = b.y - a.y
+        dx = cos(a.theta) * global_dx + sin(a.theta) * global_dy
+        dy = -sin(a.theta) * global_dx + cos(a.theta) * global_dy
+        return dx, dy, normalize_angle(b.theta - a.theta)
+
+    def _icp_edge(self, a: KeyframeNode, b: KeyframeNode, edge_type: str) -> dict[str, Any] | None:
+        source = self.keyframe_scans.get(b.id)
+        target = self.keyframe_scans.get(a.id)
+        if source is None or target is None:
+            return None
+        guess = self._relative_pose(a, b)
+        result = icp_match(source, target, init=guess)
+        if not result.converged or result.fitness < self.config.loop_closure_min_fitness:
+            return None
+        return {
+            'from_id': a.id,
+            'to_id': b.id,
+            'dx': result.dx,
+            'dy': result.dy,
+            'dtheta': result.dtheta,
+            'distance': hypot(result.dx, result.dy),
+            'fitness': result.fitness,
+            'mean_error': result.mean_error,
+            'type': edge_type,
+        }
+
+    def _build_icp_edges(self) -> None:
+        """Add scan-matching pose-pose edges: consecutive refinement + loop closures."""
+
+        # Sequential scan-to-scan refinement between consecutive keyframes.
+        for index in range(1, len(self.keyframes)):
+            edge = self._icp_edge(self.keyframes[index - 1], self.keyframes[index], 'sequential')
+            if edge is not None and edge['mean_error'] <= self.config.loop_closure_max_mean_error_m * 2.0:
+                self.icp_edges.append(edge)
+                self.icp_stats['sequential'] += 1
+
+        # Loop closures: revisit detection by spatial proximity with a large index gap.
+        positions = np.asarray([[kf.x, kf.y] for kf in self.keyframes], dtype=float)
+        for j, kf_new in enumerate(self.keyframes):
+            deltas = positions[:j] - positions[j]
+            if deltas.size == 0:
+                continue
+            distances = np.hypot(deltas[:, 0], deltas[:, 1])
+            candidates = [
+                i for i in range(j)
+                if j - i >= self.config.loop_closure_min_index_gap
+                and distances[i] <= self.config.loop_closure_radius_m
+            ]
+            candidates.sort(key=lambda i: distances[i])
+            accepted = 0
+            for i in candidates:
+                if accepted >= self.config.loop_closure_max_per_keyframe:
+                    break
+                self.icp_stats['loop_candidates'] += 1
+                edge = self._icp_edge(self.keyframes[i], kf_new, 'loop_closure')
+                if edge is None or edge['mean_error'] > self.config.loop_closure_max_mean_error_m:
+                    continue
+                guess_dx, guess_dy, guess_dtheta = self._relative_pose(self.keyframes[i], kf_new)
+                disagreement = hypot(edge['dx'] - guess_dx, edge['dy'] - guess_dy) + abs(
+                    normalize_angle(edge['dtheta'] - guess_dtheta))
+                if disagreement > self.config.loop_closure_max_odom_disagreement_m:
+                    self.icp_stats['loop_rejected_odom'] = self.icp_stats.get('loop_rejected_odom', 0) + 1
+                    continue
+                self.icp_edges.append(edge)
+                self.icp_stats['loop_closures'] += 1
+                accepted += 1
 
     def _build_from_sqlite_db(self, db3_file: Path) -> None:
         connection = sqlite3.connect(str(db3_file))
@@ -103,6 +208,12 @@ class OfflineRosbagGraphBuilder:
                 connection.execute('SELECT COUNT(*) FROM messages WHERE topic_id = ?', (image_topic_id,)).fetchone()[0]
             )
 
+            scan_topic_id = -1
+            scan_type = None
+            if self.config.enable_icp and self.config.scan_topic in topics:
+                scan_topic_id = int(topics[self.config.scan_topic]['id'])
+                scan_type = get_message(str(topics[self.config.scan_topic]['type']))
+
             max_rn = self.config.max_images * self.config.image_stride if self.config.max_images else 0
             query = '''
                 WITH sampled_images AS (
@@ -120,17 +231,22 @@ class OfflineRosbagGraphBuilder:
                 SELECT timestamp, topic_id, data
                 FROM messages
                 WHERE topic_id = ?
+                   OR topic_id = ?
                    OR id IN (SELECT id FROM sampled_images)
                 ORDER BY timestamp, id
             '''
             for _timestamp, topic_id, data in connection.execute(
                 query,
-                (image_topic_id, self.config.image_stride, max_rn, max_rn, odom_topic_id),
+                (image_topic_id, self.config.image_stride, max_rn, max_rn, odom_topic_id, scan_topic_id),
             ):
-                if int(topic_id) == odom_topic_id:
+                topic_id = int(topic_id)
+                if topic_id == odom_topic_id:
                     self.odom_count += 1
                     odom_msg = deserialize_message(data, odom_type)
                     self._on_odom(odom_msg)
+                elif topic_id == scan_topic_id and scan_type is not None:
+                    self.scan_count += 1
+                    self._on_scan(deserialize_message(data, scan_type))
                 else:
                     image_msg = deserialize_message(data, image_type)
                     self._on_image(image_msg)
@@ -158,26 +274,42 @@ class OfflineRosbagGraphBuilder:
             )
 
     def snapshot(self) -> dict[str, Any]:
+        kept_ids = {
+            landmark.id
+            for landmark in self.landmarks.values()
+            if landmark.observations >= self.config.min_landmark_observations
+        }
+        kept_landmarks = sorted(
+            (landmark for landmark in self.landmarks.values() if landmark.id in kept_ids),
+            key=lambda item: item.id,
+        )
+        kept_visual_edges = [edge for edge in self.visual_edges if edge.landmark_id in kept_ids]
         return {
             'frame_id': 'map',
             'source_bag': str(self.bag_path),
             'offline_stats': {
                 'odom_messages': self.odom_count,
                 'image_messages': self.image_count,
+                'scan_messages': self.scan_count,
                 'processed_images': self.processed_image_count,
                 'detection_frames': self.detection_frame_count,
                 'image_stride': self.config.image_stride,
+                'rejected_observations': self.rejected_observations,
+                'pruned_landmarks': len(self.landmarks) - len(kept_landmarks),
+                'icp': self.icp_stats,
             },
             'counts': {
                 'keyframes': len(self.keyframes),
-                'landmarks': len(self.landmarks),
+                'landmarks': len(kept_landmarks),
                 'odom_edges': len(self.odom_edges),
-                'visual_edges': len(self.visual_edges),
+                'icp_edges': len(self.icp_edges),
+                'visual_edges': len(kept_visual_edges),
             },
             'keyframes': [asdict(keyframe) for keyframe in self.keyframes],
-            'landmarks': [asdict(landmark) for landmark in sorted(self.landmarks.values(), key=lambda item: item.id)],
+            'landmarks': [asdict(landmark) for landmark in kept_landmarks],
             'odom_edges': [asdict(edge) for edge in self.odom_edges],
-            'visual_edges': [asdict(edge) for edge in self.visual_edges],
+            'icp_edges': self.icp_edges,
+            'visual_edges': [asdict(edge) for edge in kept_visual_edges],
         }
 
     def _create_detector(self) -> tuple[Any, Any, Any | None]:
@@ -211,6 +343,20 @@ class OfflineRosbagGraphBuilder:
         self.latest_pose = pose
         if not self.keyframes or self._should_add_keyframe(pose):
             self._add_keyframe(pose)
+
+    def _on_scan(self, msg: Any) -> None:
+        self.latest_scan_points = scan_to_points(
+            np.asarray(msg.ranges, dtype=np.float64),
+            float(msg.angle_min),
+            float(msg.angle_increment),
+            float(msg.range_min),
+            float(msg.range_max),
+            self.config.icp_max_range_m,
+            laser_x=self.config.laser_x_m,
+            laser_y=self.config.laser_y_m,
+            laser_yaw=self.config.laser_yaw_rad,
+            beam_stride=self.config.icp_beam_stride,
+        )
 
     def _on_image(self, msg: Any) -> None:
         if self.latest_pose is None:
@@ -249,9 +395,17 @@ class OfflineRosbagGraphBuilder:
             previous_stamp = self.last_observation_by_key.get(obs_key)
             if previous_stamp is not None and stamp - previous_stamp < self.config.min_observation_interval_sec:
                 continue
-            self.last_observation_by_key[obs_key] = stamp
             landmark_x = keyframe.x + measured_range * cos(keyframe.theta + measured_bearing)
             landmark_y = keyframe.y + measured_range * sin(keyframe.theta + measured_bearing)
+            existing = self.landmarks.get(marker_id)
+            if (
+                existing is not None
+                and existing.observations >= 2
+                and hypot(landmark_x - existing.x, landmark_y - existing.y) > self.config.max_landmark_jump_m
+            ):
+                self.rejected_observations += 1
+                continue
+            self.last_observation_by_key[obs_key] = stamp
             self._upsert_landmark(marker_id, landmark_x, landmark_y)
             self.visual_edges.append(
                 VisualEdge(
@@ -308,6 +462,8 @@ class OfflineRosbagGraphBuilder:
                 )
             )
         self.keyframes.append(keyframe)
+        if self.latest_scan_points is not None and len(self.latest_scan_points) > 0:
+            self.keyframe_scans[keyframe.id] = self.latest_scan_points
         return keyframe
 
     def _upsert_landmark(self, marker_id: int, x: float, y: float) -> None:
@@ -332,7 +488,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--min-keyframe-rotation-rad', type=float, default=0.35)
     parser.add_argument('--max-keyframe-period-sec', type=float, default=2.0)
     parser.add_argument('--min-observation-interval-sec', type=float, default=0.25)
-    parser.add_argument('--max-landmark-range-m', type=float, default=4.0)
+    parser.add_argument('--max-landmark-range-m', type=float, default=3.0)
+    parser.add_argument('--max-landmark-jump-m', type=float, default=0.6)
+    parser.add_argument('--min-landmark-observations', type=int, default=3)
+    parser.add_argument('--no-icp', action='store_true', help='Disable LiDAR ICP scan-matching edges.')
+    parser.add_argument('--icp-max-range-m', type=float, default=5.0)
+    parser.add_argument('--loop-closure-radius-m', type=float, default=1.2)
+    parser.add_argument('--loop-closure-min-index-gap', type=int, default=25)
     return parser
 
 
@@ -346,6 +508,12 @@ def config_from_args(args: argparse.Namespace) -> OfflineBuilderConfig:
         max_keyframe_period_sec=args.max_keyframe_period_sec,
         min_observation_interval_sec=args.min_observation_interval_sec,
         max_landmark_range_m=args.max_landmark_range_m,
+        max_landmark_jump_m=args.max_landmark_jump_m,
+        min_landmark_observations=max(1, int(args.min_landmark_observations)),
+        enable_icp=not args.no_icp,
+        icp_max_range_m=args.icp_max_range_m,
+        loop_closure_radius_m=args.loop_closure_radius_m,
+        loop_closure_min_index_gap=max(1, int(args.loop_closure_min_index_gap)),
     )
 
 

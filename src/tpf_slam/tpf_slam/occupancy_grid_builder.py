@@ -15,6 +15,11 @@ import numpy as np
 from rclpy.serialization import deserialize_message
 from rosidl_runtime_py.utilities import get_message
 
+try:  # pragma: no cover - exercised inside the ROS image
+    from scipy.spatial import cKDTree
+except Exception:  # pragma: no cover - fallback for minimal environments
+    cKDTree = None
+
 from .graph_slam_frontend_node import normalize_angle
 
 
@@ -30,12 +35,24 @@ class MappingConfig:
     min_range_m: float = 0.15
     scan_stride: int = 1
     beam_stride: int = 2
+    # Distance-based scan selection: integrate a scan only after the robot has
+    # moved/turned enough. Avoids re-stamping the same noisy returns while parked
+    # (which thickens and biases walls) and gives even spatial coverage.
+    min_scan_travel_m: float = 0.05
+    min_scan_travel_rad: float = 0.05
     log_odds_free: float = -0.35
     log_odds_occupied: float = 0.85
     log_odds_min: float = -4.0
     log_odds_max: float = 4.0
     occupied_threshold: float = 0.65
     free_threshold: float = 0.35
+    # A cell is only declared a wall once enough independent beams hit it, which
+    # removes isolated speckle from single stray returns.
+    min_hits_for_occupied: int = 2
+    # Per-scan statistical outlier removal of endpoints (isolated LiDAR returns).
+    outlier_filter: bool = True
+    outlier_neighbors: int = 6
+    outlier_std_mul: float = 2.0
     min_occupied_component_cells: int = 3
     inflate_radius_m: float = 0.15
     laser_x_m: float = 0.0
@@ -107,6 +124,8 @@ class OccupancyGridBuilder:
         self.origin_x, self.origin_y, self.width, self.height = self._grid_geometry()
         self.log_odds = np.zeros((self.height, self.width), dtype=np.float32)
         self.touched = np.zeros((self.height, self.width), dtype=bool)
+        self.hit_count = np.zeros((self.height, self.width), dtype=np.int32)
+        self._last_integrated: tuple[float, float, float] | None = None
         self.laser_x_m = config.laser_x_m
         self.laser_y_m = config.laser_y_m
         self.laser_yaw_rad = config.laser_yaw_rad
@@ -215,14 +234,25 @@ class OccupancyGridBuilder:
                 WHERE ((rn - 1) % ?) = 0
                 ORDER BY timestamp
             '''
+            total = self.stats['scan_messages']
+            seen = 0
             for _timestamp, data in connection.execute(query, (topic_id, self.config.scan_stride)):
                 scan = deserialize_message(data, scan_type)
                 self._process_scan(scan)
+                seen += 1
+                if seen % 500 == 0:
+                    print(
+                        'occupancy progress: read=%d/%d integrated=%d valid_rays=%d'
+                        % (seen * self.config.scan_stride, total, self.stats['processed_scans'], self.stats['valid_rays']),
+                        flush=True,
+                    )
         finally:
             connection.close()
 
     def _process_scan(self, scan: Any) -> None:
         pose = self.trajectory.at(float(scan.header.stamp.sec) + 1e-9 * float(scan.header.stamp.nanosec))
+        if self._skip_for_distance(pose):
+            return
         laser_cos = math.cos(pose.theta)
         laser_sin = math.sin(pose.theta)
         laser_x = pose.x + laser_cos * self.laser_x_m - laser_sin * self.laser_y_m
@@ -230,23 +260,56 @@ class OccupancyGridBuilder:
         start_cell = self._world_to_grid(laser_x, laser_y)
         if start_cell is None:
             return
+        self._last_integrated = (pose.x, pose.y, pose.theta)
         self.stats['processed_scans'] += 1
 
-        for index in range(0, len(scan.ranges), self.config.beam_stride):
-            raw_range = float(scan.ranges[index])
-            if not math.isfinite(raw_range):
+        ranges = np.asarray(scan.ranges, dtype=np.float64)
+        index = np.arange(0, ranges.shape[0], self.config.beam_stride)
+        selected = ranges[index]
+        finite = np.isfinite(selected) & (selected >= max(float(scan.range_min), self.config.min_range_m))
+        index = index[finite]
+        selected = selected[finite]
+        if index.size == 0:
+            return
+        hit_is_valid = selected <= min(float(scan.range_max), self.config.max_range_m)
+        ray_range = np.minimum(selected, self.config.max_range_m)
+        angle = pose.theta + self.laser_yaw_rad + float(scan.angle_min) + index * float(scan.angle_increment)
+        end_x = laser_x + ray_range * np.cos(angle)
+        end_y = laser_y + ray_range * np.sin(angle)
+
+        keep = self._outlier_mask(end_x[hit_is_valid], end_y[hit_is_valid])
+        valid_keep = np.ones(index.size, dtype=bool)
+        valid_keep[hit_is_valid] = keep
+
+        for k in range(index.size):
+            if not valid_keep[k]:
                 continue
-            if raw_range < max(float(scan.range_min), self.config.min_range_m):
-                continue
-            hit_is_valid = raw_range <= min(float(scan.range_max), self.config.max_range_m)
-            ray_range = min(raw_range, self.config.max_range_m)
-            angle = pose.theta + self.laser_yaw_rad + float(scan.angle_min) + index * float(scan.angle_increment)
-            end_x = laser_x + ray_range * math.cos(angle)
-            end_y = laser_y + ray_range * math.sin(angle)
-            end_cell = self._world_to_grid(end_x, end_y)
+            end_cell = self._world_to_grid(end_x[k], end_y[k])
             if end_cell is None:
                 continue
-            self._trace_ray(start_cell, end_cell, hit_is_valid)
+            self._trace_ray(start_cell, end_cell, bool(hit_is_valid[k]))
+
+    def _skip_for_distance(self, pose: Pose2D) -> bool:
+        if self._last_integrated is None:
+            return False
+        last_x, last_y, last_theta = self._last_integrated
+        moved = math.hypot(pose.x - last_x, pose.y - last_y)
+        turned = abs(normalize_angle(pose.theta - last_theta))
+        return moved < self.config.min_scan_travel_m and turned < self.config.min_scan_travel_rad
+
+    def _outlier_mask(self, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
+        """Statistical outlier removal: keep endpoints with typical neighbor spacing."""
+
+        n = xs.shape[0]
+        if not self.config.outlier_filter or cKDTree is None or n <= self.config.outlier_neighbors + 1:
+            return np.ones(n, dtype=bool)
+        points = np.column_stack([xs, ys])
+        tree = cKDTree(points)
+        k = self.config.outlier_neighbors + 1
+        distances, _ = tree.query(points, k=k)
+        mean_neighbor = distances[:, 1:].mean(axis=1)
+        threshold = mean_neighbor.mean() + self.config.outlier_std_mul * mean_neighbor.std()
+        return mean_neighbor <= threshold
 
     def _world_to_grid(self, x: float, y: float) -> tuple[int, int] | None:
         col = int(math.floor((x - self.origin_x) / self.config.resolution))
@@ -266,6 +329,8 @@ class OccupancyGridBuilder:
         if hit_is_valid:
             col, row = cells[-1]
             self._update(row, col, self.config.log_odds_occupied)
+            if 0 <= row < self.height and 0 <= col < self.width:
+                self.hit_count[row, col] += 1
             self.stats['occupied_updates'] += 1
         self.stats['valid_rays'] += 1
 
@@ -283,9 +348,23 @@ class OccupancyGridBuilder:
         probability = 1.0 - 1.0 / (1.0 + np.exp(self.log_odds))
         occupancy = np.full((self.height, self.width), -1, dtype=np.int16)
         occupancy[self.touched & (probability <= self.config.free_threshold)] = 0
-        occupancy[self.touched & (probability >= self.config.occupied_threshold)] = 100
-        known_mid = self.touched & (occupancy < 0)
-        occupancy[known_mid] = np.clip((probability[known_mid] * 100.0).astype(np.int16), 1, 99)
+        # A wall needs both high occupancy probability and enough independent hits.
+        occupied = (
+            self.touched
+            & (probability >= self.config.occupied_threshold)
+            & (self.hit_count >= self.config.min_hits_for_occupied)
+        )
+        occupancy[occupied] = 100
+        # Cells that look occupied but lack hit support fall back to free space.
+        under_supported = (
+            self.touched
+            & (probability >= self.config.occupied_threshold)
+            & (self.hit_count < self.config.min_hits_for_occupied)
+        )
+        occupancy[under_supported] = 0
+        # Intermediate-probability cells are left as unknown (-1) instead of a gray
+        # gradient: a crisp three-level map (free / occupied / unknown) reads much
+        # cleaner in RViz and is what Nav2 expects.
         occupancy = self._clean_and_inflate(occupancy)
         return occupancy
 
@@ -492,7 +571,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--margin-m', type=float, default=1.0)
     parser.add_argument('--inflate-radius-m', type=float, default=0.15)
     parser.add_argument('--min-occupied-component-cells', type=int, default=3)
+    parser.add_argument('--min-scan-travel-m', type=float, default=0.05)
+    parser.add_argument('--min-scan-travel-rad', type=float, default=0.05)
+    parser.add_argument('--min-hits-for-occupied', type=int, default=2)
+    parser.add_argument('--no-outlier-filter', action='store_true', help='Disable per-scan statistical outlier removal.')
     parser.add_argument('--no-tf-static', action='store_true', help='Disable static TF lookup and use laser_* parameters.')
+    parser.add_argument('--laser-x-m', type=float, default=-0.04, help='Laser x offset in base frame (used when TF static is off).')
+    parser.add_argument('--laser-y-m', type=float, default=0.0)
+    parser.add_argument('--laser-yaw-rad', type=float, default=1.5707963267948966)
     return parser
 
 
@@ -505,7 +591,14 @@ def config_from_args(args: argparse.Namespace) -> MappingConfig:
         margin_m=args.margin_m,
         inflate_radius_m=max(0.0, args.inflate_radius_m),
         min_occupied_component_cells=max(0, int(args.min_occupied_component_cells)),
+        min_scan_travel_m=max(0.0, args.min_scan_travel_m),
+        min_scan_travel_rad=max(0.0, args.min_scan_travel_rad),
+        min_hits_for_occupied=max(1, int(args.min_hits_for_occupied)),
+        outlier_filter=not args.no_outlier_filter,
         use_tf_static=not args.no_tf_static,
+        laser_x_m=args.laser_x_m,
+        laser_y_m=args.laser_y_m,
+        laser_yaw_rad=args.laser_yaw_rad,
     )
 
 
