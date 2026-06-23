@@ -32,6 +32,11 @@ def generate_launch_description():
         DeclareLaunchArgument('max_processed_scans', default_value='0'),
         DeclareLaunchArgument('loop', default_value='false'),
         DeclareLaunchArgument('rviz', default_value='false'),
+        DeclareLaunchArgument(
+            'play_bag',
+            default_value='false',
+            description='Replay scan/odom/tf from the bag so RViz can show raw sensor data.',
+        ),
         Node(
             package='tpf_slam',
             executable='progressive_mapping_demo_node',
@@ -68,5 +73,25 @@ def generate_launch_description():
             cmd=['rviz2', '-d', rviz_config],
             output='screen',
             condition=IfCondition(LaunchConfiguration('rviz')),
+        ),
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name='map_odom_tf',
+            arguments=['0', '0', '0', '0', '0', '0', 'map', 'odom'],
+            condition=IfCondition(LaunchConfiguration('play_bag')),
+        ),
+        ExecuteProcess(
+            cmd=[
+                'ros2', 'bag', 'play',
+                LaunchConfiguration('bag_path'),
+                '--topics', '/tb4_0/scan', '/tb4_0/odom',
+                '/tb4_0/tf', '/tb4_0/tf_static',
+                '--remap',
+                '/tb4_0/tf:=/tf',
+                '/tb4_0/tf_static:=/tf_static',
+            ],
+            output='screen',
+            condition=IfCondition(LaunchConfiguration('play_bag')),
         ),
     ])

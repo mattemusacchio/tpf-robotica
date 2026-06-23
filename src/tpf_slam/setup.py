@@ -36,6 +36,7 @@ setup(
             'occupancy_grid_builder = tpf_slam.occupancy_grid_builder:main',
             'progressive_mapping_demo_node = tpf_slam.progressive_mapping_demo_node:main',
             'slam_quality_report = tpf_slam.slam_quality_report:main',
+            'second_pass_icp = tpf_slam.second_pass_icp:main',
         ],
     },
 )
