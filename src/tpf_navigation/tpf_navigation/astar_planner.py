@@ -17,12 +17,21 @@ import rclpy
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import OccupancyGrid, Path
 from rclpy.node import Node
+from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
+                        ReliabilityPolicy)
 from scipy.ndimage import binary_dilation, generate_binary_structure
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker
 
 
 _SQRT2 = math.sqrt(2.0)
+
+_MAP_QOS = QoSProfile(
+    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    reliability=ReliabilityPolicy.RELIABLE,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=1,
+)
 _DIRS = [(1, 0), (-1, 0), (0, 1), (0, -1),
          (1, 1), (1, -1), (-1, 1), (-1, -1)]
 _COSTS = [1.0, 1.0, 1.0, 1.0, _SQRT2, _SQRT2, _SQRT2, _SQRT2]
@@ -146,7 +155,7 @@ class AStarPlanner(Node):
         self.create_subscription(
             OccupancyGrid,
             str(self.get_parameter('map_topic').value),
-            self._on_map, 10)
+            self._on_map, _MAP_QOS)
         self.create_subscription(
             PoseWithCovarianceStamped,
             str(self.get_parameter('pose_topic').value),

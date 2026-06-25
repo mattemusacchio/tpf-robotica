@@ -22,7 +22,15 @@ from geometry_msgs.msg import (PoseArray, PoseStamped,
                                 TransformStamped)
 from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
+                        ReliabilityPolicy, qos_profile_sensor_data)
+
+_MAP_QOS = QoSProfile(
+    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    reliability=ReliabilityPolicy.RELIABLE,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=1,
+)
 from scipy.ndimage import distance_transform_edt
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
@@ -118,7 +126,7 @@ class MCLLocalizer(Node):
 
         self.create_subscription(
             OccupancyGrid, str(self.get_parameter('map_topic').value),
-            self._on_map, 10)
+            self._on_map, _MAP_QOS)
         self.create_subscription(
             Odometry, str(self.get_parameter('odom_topic').value),
             self._on_odom, qos_profile_sensor_data)

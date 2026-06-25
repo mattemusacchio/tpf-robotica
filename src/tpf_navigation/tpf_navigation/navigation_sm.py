@@ -9,7 +9,15 @@ import rclpy
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
+                        ReliabilityPolicy, qos_profile_sensor_data)
+
+_MAP_QOS = QoSProfile(
+    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    reliability=ReliabilityPolicy.RELIABLE,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=1,
+)
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
@@ -95,7 +103,7 @@ class NavigationSM(Node):
         self.create_subscription(PoseWithCovarianceStamped, '/pose_estimate', self._cb_pose, qos)
         self.create_subscription(String, '/nav_status', self._cb_nav_status, 10)
         self.create_subscription(LaserScan, '/scan', self._cb_scan, qos)
-        self.create_subscription(OccupancyGrid, '/map', self._cb_map, 10)
+        self.create_subscription(OccupancyGrid, '/map', self._cb_map, _MAP_QOS)
         self.create_subscription(PoseStamped, '/goal_pose', self._cb_goal_pose, 10)
         self.create_subscription(PoseWithCovarianceStamped, '/initialpose', self._cb_initialpose, 10)
 
