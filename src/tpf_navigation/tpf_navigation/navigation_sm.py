@@ -50,6 +50,22 @@ class NavigationSM(Node):
     def __init__(self) -> None:
         super().__init__('navigation_sm')
 
+        self.declare_parameter('obstacle_stop_range_m', _OBSTACLE_DIST_TRIGGER)
+        self.declare_parameter('obstacle_range_m', _OBSTACLE_DETECT_RANGE)
+        self.declare_parameter('obstacle_confirm_hits', _OBSTACLE_HIT_REQUIRED)
+        self.declare_parameter('obstacle_decay_s', _OBSTACLE_DECAY_S)
+        self.declare_parameter('localized_cov_thresh', _COV_DIAG_THRESH)
+        self.declare_parameter('localizing_timeout_s', _LOCALIZING_TIMEOUT_S)
+        self.declare_parameter('planning_timeout_s', _PLANNING_TIMEOUT_S)
+
+        self._obs_stop_range = float(self.get_parameter('obstacle_stop_range_m').value)
+        self._obs_detect_range = float(self.get_parameter('obstacle_range_m').value)
+        self._obs_confirm_hits = int(self.get_parameter('obstacle_confirm_hits').value)
+        self._obs_decay_s = float(self.get_parameter('obstacle_decay_s').value)
+        self._cov_thresh = float(self.get_parameter('localized_cov_thresh').value)
+        self._localizing_timeout = float(self.get_parameter('localizing_timeout_s').value)
+        self._planning_timeout = float(self.get_parameter('planning_timeout_s').value)
+
         self._state = State.IDLE
         self._state_entry_time: float = self.get_clock().now().nanoseconds * 1e-9
 
@@ -74,8 +90,6 @@ class NavigationSM(Node):
 
         self._avoid_entry_time: float = 0.0
 
-        self._marker_id: int = 0
-
         qos = qos_profile_sensor_data
 
         self.create_subscription(PoseWithCovarianceStamped, '/pose_estimate', self._cb_pose, qos)
@@ -88,8 +102,6 @@ class NavigationSM(Node):
         self._pub_nav_state = self.create_publisher(String, '/nav_state', 10)
         self._pub_cmd_vel = self.create_publisher(Twist, '/cmd_vel', 10)
         self._pub_obstacles = self.create_publisher(MarkerArray, '/detected_obstacles', 10)
-        self._pub_nav_status = self.create_publisher(String, '/nav_status', 10)
-        self._pub_goal_replan = self.create_publisher(String, '/goal_pose_replan', 10)
         self._pub_goal_pose = self.create_publisher(PoseStamped, '/goal_pose', 10)
 
         self.create_timer(0.1, self._tick)
@@ -108,7 +120,7 @@ class NavigationSM(Node):
 
         cov = msg.pose.covariance
         diag_sum = cov[0] + cov[7] + cov[35]
-        self._localized = diag_sum < _COV_DIAG_THRESH
+        self._localized = diag_sum < self._cov_thresh
 
     def _cb_nav_status(self, msg: String) -> None:
         try:
@@ -146,12 +158,11 @@ class NavigationSM(Node):
 
         rx, ry, ryaw = self._robot_x, self._robot_y, self._robot_yaw
 
-        angle = msg.angle_min
         cells_hit_this_cb: set[tuple[int, int]] = set()
 
-        for r in msg.ranges:
-            angle += msg.angle_increment
-            if not (msg.range_min <= r <= min(msg.range_max, _OBSTACLE_DETECT_RANGE)):
+        for i, r in enumerate(msg.ranges):
+            angle = msg.angle_min + i * msg.angle_increment
+            if not (msg.range_min <= r <= min(msg.range_max, self._obs_detect_range)):
                 continue
 
             wx = rx + r * math.cos(ryaw + angle)
@@ -176,7 +187,7 @@ class NavigationSM(Node):
             entry[0] += 1
             entry[1] = now
             entry[2] += 1
-            if entry[2] >= _OBSTACLE_HIT_REQUIRED:
+            if entry[2] >= self._obs_confirm_hits:
                 self._confirmed_obstacles.add(cell)
 
         self._publish_obstacle_markers()
@@ -186,7 +197,7 @@ class NavigationSM(Node):
                 wx = cell[0] * _OBSTACLE_CELL_SIZE
                 wy = cell[1] * _OBSTACLE_CELL_SIZE
                 dist = math.hypot(wx - rx, wy - ry)
-                if dist < _OBSTACLE_DIST_TRIGGER:
+                if dist < self._obs_stop_range:
                     self._stop_robot()
                     self._avoid_entry_time = now
                     self._transition(State.AVOIDING_OBSTACLE)
@@ -204,7 +215,7 @@ class NavigationSM(Node):
         if s == State.LOCALIZING:
             if self._localized:
                 self._transition(State.WAIT_GOAL)
-            elif elapsed > _LOCALIZING_TIMEOUT_S:
+            elif elapsed > self._localizing_timeout:
                 self.get_logger().warn('Localization timed out after 60s')
                 self._transition(State.ERROR_RECOVERY)
 
@@ -216,7 +227,7 @@ class NavigationSM(Node):
             elif status == 'PLANNING_FAILED':
                 self._last_nav_status = ''
                 self._transition(State.ERROR_RECOVERY)
-            elif elapsed > _PLANNING_TIMEOUT_S:
+            elif elapsed > self._planning_timeout:
                 self.get_logger().warn('Planning timed out after 5s')
                 self._transition(State.ERROR_RECOVERY)
 
@@ -231,7 +242,6 @@ class NavigationSM(Node):
 
         elif s == State.AVOIDING_OBSTACLE:
             if elapsed >= _AVOID_WAIT_S:
-                self._trigger_replan()
                 self._transition(State.PLANNING)
 
         elif s == State.ALIGNING_FINAL_YAW:
@@ -261,21 +271,6 @@ class NavigationSM(Node):
         self._state = new_state
         self._state_entry_time = self.get_clock().now().nanoseconds * 1e-9
         self.get_logger().info(f'State transition: {old.name} → {new_state.name}')
-
-        status_map = {
-            State.PLANNING: 'PLANNING',
-            State.FOLLOWING_PATH: 'FOLLOWING',
-            State.AVOIDING_OBSTACLE: 'AVOIDING_OBSTACLE',
-            State.ALIGNING_FINAL_YAW: 'ALIGNING',
-            State.GOAL_REACHED: 'GOAL_REACHED',
-            State.ERROR_RECOVERY: 'ERROR_RECOVERY',
-            State.WAIT_GOAL: 'WAIT_GOAL',
-            State.LOCALIZING: 'LOCALIZING',
-            State.IDLE: 'IDLE',
-        }
-        out = String()
-        out.data = json.dumps({'status': status_map.get(new_state, new_state.name)})
-        self._pub_nav_status.publish(out)
 
         self._pub_state_name()
 
@@ -342,23 +337,10 @@ class NavigationSM(Node):
     def _publish_goal(self, goal: PoseStamped) -> None:
         self._pub_goal_pose.publish(goal)
 
-    def _trigger_replan(self) -> None:
-        if self._current_goal is None:
-            return
-        p = self._current_goal.pose.position
-        q = self._current_goal.pose.orientation
-        payload = json.dumps({
-            'x': p.x, 'y': p.y,
-            'qz': q.z, 'qw': q.w,
-        })
-        msg = String()
-        msg.data = payload
-        self._pub_goal_replan.publish(msg)
-
     def _decay_obstacles(self, now: float) -> None:
         expired = [
             cell for cell, entry in self._obstacle_hits.items()
-            if now - entry[1] > _OBSTACLE_DECAY_S
+            if now - entry[1] > self._obs_decay_s
         ]
         for cell in expired:
             del self._obstacle_hits[cell]
