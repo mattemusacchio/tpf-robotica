@@ -406,7 +406,9 @@ class MCLLocalizer(Node):
         cov = [0.0] * 36
         cov[0] = var_x
         cov[7] = var_y
-        cov[35] = float(np.sum(self._weights * _normalize(self._particles[:, 2] - est_yaw) ** 2))
+        d_angles = self._particles[:, 2] - est_yaw
+        d_angles_norm = np.arctan2(np.sin(d_angles), np.cos(d_angles))
+        cov[35] = float(np.sum(self._weights * d_angles_norm ** 2))
         pose_msg.pose.covariance = cov
         self._pose_pub.publish(pose_msg)
 
