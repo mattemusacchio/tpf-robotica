@@ -14,6 +14,7 @@ setup(
         (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
         (os.path.join('share', package_name, 'rviz'), glob('rviz/*.rviz')),
+        (os.path.join('share', package_name, 'maps'), glob('maps/*')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -29,6 +30,7 @@ setup(
             'astar_planner = tpf_navigation.astar_planner:main',
             'pure_pursuit = tpf_navigation.pure_pursuit:main',
             'navigation_sm = tpf_navigation.navigation_sm:main',
+            'generate_casa_map = tpf_navigation.generate_casa_map:main',
         ],
     },
 )
