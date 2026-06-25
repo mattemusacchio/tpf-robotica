@@ -37,8 +37,8 @@ from std_msgs.msg import String
 from tf2_ros import TransformBroadcaster
 
 
-def _normalize(a: float) -> float:
-    return math.atan2(math.sin(a), math.cos(a))
+def _normalize(a):
+    return np.arctan2(np.sin(a), np.cos(a))
 
 
 def _quat_from_yaw(yaw: float) -> tuple[float, float, float, float]:
@@ -406,9 +406,7 @@ class MCLLocalizer(Node):
         cov = [0.0] * 36
         cov[0] = var_x
         cov[7] = var_y
-        d_angles = self._particles[:, 2] - est_yaw
-        d_angles_norm = np.arctan2(np.sin(d_angles), np.cos(d_angles))
-        cov[35] = float(np.sum(self._weights * d_angles_norm ** 2))
+        cov[35] = float(np.sum(self._weights * _normalize(self._particles[:, 2] - est_yaw) ** 2))
         pose_msg.pose.covariance = cov
         self._pose_pub.publish(pose_msg)
 
