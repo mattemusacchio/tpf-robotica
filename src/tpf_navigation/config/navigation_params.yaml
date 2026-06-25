@@ -1,0 +1,58 @@
+/**:
+  ros__parameters:
+    use_sim_time: true
+
+virtual_aruco_sensor:
+  ros__parameters:
+    max_range_m: 3.5
+    sigma_range: 0.05
+    sigma_bearing: 0.02
+    publish_rate_hz: 10.0
+    odom_topic: /odom
+    map_topic: /map
+
+mcl_localizer:
+  ros__parameters:
+    num_particles: 500
+    alpha1: 0.10
+    alpha2: 0.10
+    alpha3: 0.05
+    alpha4: 0.05
+    lidar_sigma_m: 0.10
+    lidar_ray_stride: 10
+    lidar_max_range_m: 3.5
+    lidar_weight: 1.0
+    lm_sigma_range: 0.15
+    lm_sigma_bearing: 0.10
+    lm_weight: 2.0
+    publish_rate_hz: 10.0
+    lost_var_thresh: 2.0
+    scan_topic: /scan
+    odom_topic: /odom
+
+astar_planner:
+  ros__parameters:
+    inflation_radius_m: 0.20
+    smooth_window: 5
+
+pure_pursuit:
+  ros__parameters:
+    lookahead_m: 0.40
+    v_max: 0.20
+    omega_max: 0.80
+    omega_align_max: 0.50
+    tolerance_m: 0.15
+    align_tolerance_rad: 0.087
+    align_kp: 1.2
+    v_ramp_start_m: 0.60
+    control_rate_hz: 20.0
+
+navigation_sm:
+  ros__parameters:
+    obstacle_confirm_hits: 3
+    obstacle_range_m: 1.5
+    obstacle_stop_range_m: 1.0
+    obstacle_decay_s: 5.0
+    localizing_timeout_s: 60.0
+    planning_timeout_s: 5.0
+    localized_cov_thresh: 1.0
