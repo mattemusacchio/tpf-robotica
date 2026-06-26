@@ -43,7 +43,8 @@ def _astar(blocked: np.ndarray,
     """Return list of (col, row) from start to goal, or None if unreachable."""
     h, w = blocked.shape
     g_score: dict[tuple[int, int], float] = {start: 0.0}
-    came_from: dict[tuple[int, int], tuple[int, int] | None] = {}
+    came_from: dict[tuple[int, int], tuple[int, int] | None] = {start: None}
+    closed: set[tuple[int, int]] = set()
     heap: list[tuple[float, float, tuple[int, int]]] = []
 
     def heur(c: tuple[int, int]) -> float:
@@ -53,9 +54,9 @@ def _astar(blocked: np.ndarray,
 
     while heap:
         _, g, cur = heapq.heappop(heap)
-        if cur in came_from:
+        if cur in closed:
             continue
-        came_from[cur] = None if cur == start else came_from.get(cur)
+        closed.add(cur)
         if cur == goal:
             path: list[tuple[int, int]] = []
             node: tuple[int, int] | None = goal

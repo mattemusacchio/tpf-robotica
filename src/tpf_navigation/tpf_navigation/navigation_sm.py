@@ -51,7 +51,7 @@ _PLANNING_TIMEOUT_S = 5.0
 _GOAL_REACHED_DWELL_S = 2.0
 _AVOID_WAIT_S = 0.5
 _MAX_RECOVERIES = 3
-_RECOVERY_ROTATE_RAD = math.radians(30.0)
+_RECOVERY_ROTATE_RAD = math.radians(180.0)
 
 
 class NavigationSM(Node):
@@ -141,14 +141,18 @@ class NavigationSM(Node):
         self._map = msg
 
     def _cb_goal_pose(self, msg: PoseStamped) -> None:
-        if self._state in (State.FOLLOWING_PATH, State.PLANNING,
-                           State.ALIGNING_FINAL_YAW, State.WAIT_GOAL,
-                           State.GOAL_REACHED):
+        # Exclude PLANNING: SM publishes to /goal_pose for replanning and
+        # would otherwise re-trigger itself from its own echo.
+        if self._state in (State.FOLLOWING_PATH, State.ALIGNING_FINAL_YAW,
+                           State.WAIT_GOAL, State.GOAL_REACHED,
+                           State.ERROR_RECOVERY):
             self._current_goal = msg
+            self._recovery_count = 0
             self._transition(State.PLANNING)
 
     def _cb_initialpose(self, msg: PoseWithCovarianceStamped) -> None:
-        if self._state == State.IDLE:
+        if self._state in (State.IDLE, State.ERROR_RECOVERY, State.WAIT_GOAL):
+            self._recovery_count = 0
             self._transition(State.LOCALIZING)
 
     def _cb_scan(self, msg: LaserScan) -> None:
@@ -222,10 +226,16 @@ class NavigationSM(Node):
 
         if s == State.LOCALIZING:
             if self._localized:
+                self._stop_robot()
                 self._transition(State.WAIT_GOAL)
             elif elapsed > self._localizing_timeout:
+                self._stop_robot()
                 self.get_logger().warn('Localization timed out after 60s')
                 self._transition(State.ERROR_RECOVERY)
+            else:
+                twist = Twist()
+                twist.angular.z = 0.3
+                self._pub_cmd_vel.publish(twist)
 
         elif s == State.PLANNING:
             status = self._last_nav_status
@@ -249,7 +259,10 @@ class NavigationSM(Node):
                 self._transition(State.GOAL_REACHED)
 
         elif s == State.AVOIDING_OBSTACLE:
-            if elapsed >= _AVOID_WAIT_S:
+            if self._last_nav_status == 'GOAL_REACHED':
+                self._last_nav_status = ''
+                self._transition(State.GOAL_REACHED)
+            elif elapsed >= _AVOID_WAIT_S:
                 self._transition(State.PLANNING)
 
         elif s == State.ALIGNING_FINAL_YAW:
