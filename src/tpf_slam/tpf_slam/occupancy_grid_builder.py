@@ -579,6 +579,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--laser-x-m', type=float, default=-0.04, help='Laser x offset in base frame (used when TF static is off).')
     parser.add_argument('--laser-y-m', type=float, default=0.0)
     parser.add_argument('--laser-yaw-rad', type=float, default=1.5707963267948966)
+    parser.add_argument('--scan-topic', type=str, default='/tb4_0/scan', help='LaserScan topic name in the bag.')
     return parser
 
 
@@ -599,6 +600,7 @@ def config_from_args(args: argparse.Namespace) -> MappingConfig:
         laser_x_m=args.laser_x_m,
         laser_y_m=args.laser_y_m,
         laser_yaw_rad=args.laser_yaw_rad,
+        scan_topic=args.scan_topic,
     )
 
 

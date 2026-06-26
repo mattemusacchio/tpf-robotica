@@ -30,7 +30,6 @@ setup(
             'astar_planner = tpf_navigation.astar_planner:main',
             'pure_pursuit = tpf_navigation.pure_pursuit:main',
             'navigation_sm = tpf_navigation.navigation_sm:main',
-            'generate_casa_map = tpf_navigation.generate_casa_map:main',
         ],
     },
 )

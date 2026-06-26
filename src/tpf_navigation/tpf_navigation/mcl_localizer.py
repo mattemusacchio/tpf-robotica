@@ -69,6 +69,11 @@ class MCLLocalizer(Node):
         self.declare_parameter('lidar_ray_stride', 10)
         self.declare_parameter('lidar_max_range_m', 3.5)
         self.declare_parameter('lidar_weight', 1.0)
+        self.declare_parameter('z_rand', 0.15)  # uniform mixture fraction; prevents weight collapse on unmapped obstacles
+        # Laser mount offset — must match the values used during SLAM
+        self.declare_parameter('laser_x_m', -0.04)
+        self.declare_parameter('laser_y_m', 0.0)
+        self.declare_parameter('laser_yaw_rad', 1.5707963267948966)  # π/2
         # Landmark model
         self.declare_parameter('lm_sigma_range', 0.15)
         self.declare_parameter('lm_sigma_bearing', 0.10)
@@ -85,6 +90,10 @@ class MCLLocalizer(Node):
         self._lidar_stride = int(self.get_parameter('lidar_ray_stride').value)
         self._lidar_max = float(self.get_parameter('lidar_max_range_m').value)
         self._lidar_w = float(self.get_parameter('lidar_weight').value)
+        self._z_rand = float(self.get_parameter('z_rand').value)
+        self._laser_x = float(self.get_parameter('laser_x_m').value)
+        self._laser_y = float(self.get_parameter('laser_y_m').value)
+        self._laser_yaw = float(self.get_parameter('laser_yaw_rad').value)
         self._lm_sr = float(self.get_parameter('lm_sigma_range').value)
         self._lm_sb = float(self.get_parameter('lm_sigma_bearing').value)
         self._lm_w = float(self.get_parameter('lm_weight').value)
@@ -284,21 +293,32 @@ class MCLLocalizer(Node):
         sigma = self._lidar_sigma
         inv2s2 = 1.0 / (2.0 * sigma ** 2)
 
+        z_rand = self._z_rand
+        z_hit = 1.0 - z_rand
+
         log_w = np.zeros(self._N)
         px = self._particles[:, 0]
         py = self._particles[:, 1]
         pth = self._particles[:, 2]
+        # Laser origin offset (same transform used during SLAM map building)
+        cos_th = np.cos(pth)
+        sin_th = np.sin(pth)
+        lx = px + cos_th * self._laser_x - sin_th * self._laser_y
+        ly = py + sin_th * self._laser_x + cos_th * self._laser_y
 
         for r, a in zip(r_sel, a_sel):
-            # endpoint in world frame for each particle
-            wx = px + r * np.cos(pth + a)
-            wy = py + r * np.sin(pth + a)
+            # endpoint in world frame for each particle (with laser mount offset)
+            wx = lx + r * np.cos(pth + self._laser_yaw + a)
+            wy = ly + r * np.sin(pth + self._laser_yaw + a)
             cols = ((wx - ox) / res).astype(int)
             rows = ((wy - oy) / res).astype(int)
             in_bounds = (cols >= 0) & (cols < w) & (rows >= 0) & (rows < h)
             d = np.where(in_bounds, self._lf[
                 np.clip(rows, 0, h - 1), np.clip(cols, 0, w - 1)], sigma * 3)
-            log_w += -d * d * inv2s2
+            # Mixture model: z_hit * Gaussian(d) + z_rand
+            # Prevents weight collapse when rays hit obstacles not in map (furniture).
+            p_hit = np.exp(-d * d * inv2s2)
+            log_w += np.log(z_hit * p_hit + z_rand)
 
         self._weights *= np.exp(log_w * self._lidar_w)
 
@@ -424,7 +444,11 @@ class MCLLocalizer(Node):
         ty = est_y - (sin_d * self._odom_x + cos_d * self._odom_y)
 
         tf_msg = TransformStamped()
-        tf_msg.header.stamp = now
+        # Stamp slightly in the past so TF buffer covers scan timestamps,
+        # which lag behind wall-clock by ~one scan period (~33ms for LDS-01).
+        from rclpy.duration import Duration
+        past = self.get_clock().now() - Duration(nanoseconds=150_000_000)
+        tf_msg.header.stamp = past.to_msg()
         tf_msg.header.frame_id = 'map'
         tf_msg.child_frame_id = 'odom'
         tf_msg.transform.translation.x = tx

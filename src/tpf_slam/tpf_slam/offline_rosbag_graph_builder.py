@@ -55,6 +55,8 @@ class OfflineBuilderConfig:
     # seen too few times to be trustworthy.
     max_landmark_jump_m: float = 0.6
     min_landmark_observations: int = 3
+    # ArUco landmark detection (requires camera images in bag).
+    enable_aruco: bool = True
     # LiDAR scan-matching constraints.
     enable_icp: bool = True
     icp_max_range_m: float = 5.0
@@ -197,16 +199,9 @@ class OfflineRosbagGraphBuilder:
             }
             if self.config.odom_topic not in topics:
                 raise KeyError(f'Odom topic {self.config.odom_topic!r} not found in {db3_file}')
-            if self.config.image_topic not in topics:
-                raise KeyError(f'Image topic {self.config.image_topic!r} not found in {db3_file}')
 
             odom_topic_id = int(topics[self.config.odom_topic]['id'])
-            image_topic_id = int(topics[self.config.image_topic]['id'])
             odom_type = get_message(str(topics[self.config.odom_topic]['type']))
-            image_type = get_message(str(topics[self.config.image_topic]['type']))
-            self.image_count += int(
-                connection.execute('SELECT COUNT(*) FROM messages WHERE topic_id = ?', (image_topic_id,)).fetchone()[0]
-            )
 
             scan_topic_id = -1
             scan_type = None
@@ -214,40 +209,63 @@ class OfflineRosbagGraphBuilder:
                 scan_topic_id = int(topics[self.config.scan_topic]['id'])
                 scan_type = get_message(str(topics[self.config.scan_topic]['type']))
 
-            max_rn = self.config.max_images * self.config.image_stride if self.config.max_images else 0
-            query = '''
-                WITH sampled_images AS (
-                    SELECT id
-                    FROM (
-                        SELECT
-                            id,
-                            ROW_NUMBER() OVER (ORDER BY timestamp, id) AS rn
-                        FROM messages
-                        WHERE topic_id = ?
-                    )
-                    WHERE ((rn - 1) % ?) = 0
-                      AND (? = 0 OR rn <= ?)
+            use_aruco = self.config.enable_aruco and self.config.image_topic in topics
+            image_topic_id = -1
+            image_type = None
+            if use_aruco:
+                image_topic_id = int(topics[self.config.image_topic]['id'])
+                image_type = get_message(str(topics[self.config.image_topic]['type']))
+                self.image_count += int(
+                    connection.execute('SELECT COUNT(*) FROM messages WHERE topic_id = ?', (image_topic_id,)).fetchone()[0]
                 )
-                SELECT timestamp, topic_id, data
-                FROM messages
-                WHERE topic_id = ?
-                   OR topic_id = ?
-                   OR id IN (SELECT id FROM sampled_images)
-                ORDER BY timestamp, id
-            '''
-            for _timestamp, topic_id, data in connection.execute(
-                query,
-                (image_topic_id, self.config.image_stride, max_rn, max_rn, odom_topic_id, scan_topic_id),
-            ):
+
+            if use_aruco:
+                max_rn = self.config.max_images * self.config.image_stride if self.config.max_images else 0
+                query = '''
+                    WITH sampled_images AS (
+                        SELECT id
+                        FROM (
+                            SELECT
+                                id,
+                                ROW_NUMBER() OVER (ORDER BY timestamp, id) AS rn
+                            FROM messages
+                            WHERE topic_id = ?
+                        )
+                        WHERE ((rn - 1) % ?) = 0
+                          AND (? = 0 OR rn <= ?)
+                    )
+                    SELECT timestamp, topic_id, data
+                    FROM messages
+                    WHERE topic_id = ?
+                       OR topic_id = ?
+                       OR id IN (SELECT id FROM sampled_images)
+                    ORDER BY timestamp, id
+                '''
+                rows = connection.execute(
+                    query,
+                    (image_topic_id, self.config.image_stride, max_rn, max_rn, odom_topic_id, scan_topic_id),
+                )
+            else:
+                query = '''
+                    SELECT timestamp, topic_id, data
+                    FROM messages
+                    WHERE topic_id = ? OR topic_id = ?
+                    ORDER BY timestamp, id
+                '''
+                rows = connection.execute(query, (odom_topic_id, scan_topic_id))
+
+            for _timestamp, topic_id, data in rows:
                 topic_id = int(topic_id)
                 if topic_id == odom_topic_id:
                     self.odom_count += 1
                     odom_msg = deserialize_message(data, odom_type)
                     self._on_odom(odom_msg)
+                    if not use_aruco:
+                        self._print_progress_if_needed()
                 elif topic_id == scan_topic_id and scan_type is not None:
                     self.scan_count += 1
                     self._on_scan(deserialize_message(data, scan_type))
-                else:
+                elif use_aruco and topic_id == image_topic_id and image_type is not None:
                     image_msg = deserialize_message(data, image_type)
                     self._on_image(image_msg)
                     self._print_progress_if_needed()
@@ -491,10 +509,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--max-landmark-range-m', type=float, default=3.0)
     parser.add_argument('--max-landmark-jump-m', type=float, default=0.6)
     parser.add_argument('--min-landmark-observations', type=int, default=3)
+    parser.add_argument('--no-aruco', action='store_true', help='Skip ArUco/image processing (use for bags without camera).')
     parser.add_argument('--no-icp', action='store_true', help='Disable LiDAR ICP scan-matching edges.')
     parser.add_argument('--icp-max-range-m', type=float, default=5.0)
     parser.add_argument('--loop-closure-radius-m', type=float, default=1.2)
     parser.add_argument('--loop-closure-min-index-gap', type=int, default=25)
+    parser.add_argument('--scan-topic', default='/tb4_0/scan', help='LiDAR topic name in the bag.')
+    parser.add_argument('--odom-topic', default='/tb4_0/odom', help='Odometry topic name in the bag.')
     return parser
 
 
@@ -510,10 +531,13 @@ def config_from_args(args: argparse.Namespace) -> OfflineBuilderConfig:
         max_landmark_range_m=args.max_landmark_range_m,
         max_landmark_jump_m=args.max_landmark_jump_m,
         min_landmark_observations=max(1, int(args.min_landmark_observations)),
+        enable_aruco=not args.no_aruco,
         enable_icp=not args.no_icp,
         icp_max_range_m=args.icp_max_range_m,
         loop_closure_radius_m=args.loop_closure_radius_m,
         loop_closure_min_index_gap=max(1, int(args.loop_closure_min_index_gap)),
+        scan_topic=args.scan_topic,
+        odom_topic=args.odom_topic,
     )
 
 

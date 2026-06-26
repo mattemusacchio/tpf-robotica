@@ -98,6 +98,13 @@ class NavigationSM(Node):
 
         self._avoid_entry_time: float = 0.0
 
+        # Stuck detection: track last known position during path following
+        self._stuck_check_x: float = 0.0
+        self._stuck_check_y: float = 0.0
+        self._stuck_check_time: float = 0.0
+        self._STUCK_TIMEOUT_S: float = 8.0
+        self._STUCK_DIST_M: float = 0.05
+
         qos = qos_profile_sensor_data
 
         self.create_subscription(PoseWithCovarianceStamped, '/pose_estimate', self._cb_pose, qos)
@@ -128,7 +135,12 @@ class NavigationSM(Node):
 
         cov = msg.pose.covariance
         diag_sum = cov[0] + cov[7] + cov[35]
+        was_localized = self._localized
         self._localized = diag_sum < self._cov_thresh
+        if was_localized and not self._localized:
+            # MCL just went LOST — stale obstacle detections would be at wrong positions
+            self._obstacle_hits.clear()
+            self._confirmed_obstacles.clear()
 
     def _cb_nav_status(self, msg: String) -> None:
         try:
@@ -169,6 +181,11 @@ class NavigationSM(Node):
         map_data = self._map.data
 
         rx, ry, ryaw = self._robot_x, self._robot_y, self._robot_yaw
+        # Laser mount — TurtleBot3 burger in Gazebo: x=-0.032m, no yaw offset
+        _LASER_X = -0.032
+        _LASER_YAW = 0.0
+        sx = rx + _LASER_X * math.cos(ryaw)
+        sy = ry + _LASER_X * math.sin(ryaw)
 
         cells_hit_this_cb: set[tuple[int, int]] = set()
 
@@ -177,8 +194,8 @@ class NavigationSM(Node):
             if not (msg.range_min <= r <= min(msg.range_max, self._obs_detect_range)):
                 continue
 
-            wx = rx + r * math.cos(ryaw + angle)
-            wy = ry + r * math.sin(ryaw + angle)
+            wx = sx + r * math.cos(ryaw + _LASER_YAW + angle)
+            wy = sy + r * math.sin(ryaw + _LASER_YAW + angle)
 
             col = int((wx - map_ox) / map_res)
             row = int((wy - map_oy) / map_res)
@@ -250,6 +267,26 @@ class NavigationSM(Node):
                 self._transition(State.ERROR_RECOVERY)
 
         elif s == State.FOLLOWING_PATH:
+            # Abort if MCL lost track (e.g. robot fell or collided badly)
+            if not self._localized:
+                self.get_logger().warn('MCL LOST during navigation — aborting to LOCALIZING')
+                self._stop_robot()
+                self._transition(State.LOCALIZING)
+                return
+
+            # Stuck detection: abort if robot hasn't moved in _STUCK_TIMEOUT_S seconds
+            dist_moved = math.hypot(self._robot_x - self._stuck_check_x,
+                                    self._robot_y - self._stuck_check_y)
+            if dist_moved > self._STUCK_DIST_M:
+                self._stuck_check_x = self._robot_x
+                self._stuck_check_y = self._robot_y
+                self._stuck_check_time = now
+            elif now - self._stuck_check_time > self._STUCK_TIMEOUT_S:
+                self.get_logger().warn('Robot stuck — triggering recovery')
+                self._stop_robot()
+                self._transition(State.ERROR_RECOVERY)
+                return
+
             status = self._last_nav_status
             if status == 'AT_POSITION':
                 self._last_nav_status = ''
@@ -297,6 +334,11 @@ class NavigationSM(Node):
 
         if new_state == State.PLANNING and self._current_goal is not None:
             self._publish_goal(self._current_goal)
+
+        if new_state == State.FOLLOWING_PATH:
+            self._stuck_check_x = self._robot_x
+            self._stuck_check_y = self._robot_y
+            self._stuck_check_time = self._state_entry_time
 
         if new_state == State.ERROR_RECOVERY:
             self._recovery_rotating = False
