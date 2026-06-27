@@ -42,51 +42,72 @@ _MAP_QOS = QoSProfile(
 _DIRS = [(1, 0), (-1, 0), (0, 1), (0, -1),
          (1, 1), (1, -1), (-1, 1), (-1, -1)]
 _COSTS = [1.0, 1.0, 1.0, 1.0, _SQRT2, _SQRT2, _SQRT2, _SQRT2]
+# Heading angle for each direction in _DIRS (radians)
+_DIR_ANGLES = [0.0, math.pi, math.pi / 2, -math.pi / 2,
+               math.pi / 4, -math.pi / 4, 3 * math.pi / 4, -3 * math.pi / 4]
+
+
+def _angle_diff(a: float, b: float) -> float:
+    """Shortest angular distance between two angles, in [0, π]."""
+    d = abs(a - b) % (2 * math.pi)
+    return min(d, 2 * math.pi - d)
 
 
 def _astar(costmap: np.ndarray,
            start: tuple[int, int],
-           goal: tuple[int, int]) -> list[tuple[int, int]] | None:
+           goal: tuple[int, int],
+           start_heading: float = 0.0,
+           turn_weight: float = 1.0) -> list[tuple[int, int]] | None:
     """Return list of (col, row) from start to goal, or None if unreachable.
 
+    State: (col, row, dir_idx) — heading-aware so A* penalises sharp turns.
+    This models the non-holonomic constraint: paths with gentle curves are
+    preferred over geometrically shorter paths that require U-turns.
+
     costmap: float array — inf=lethal, 0=free, gradient in between.
-    Terrain cost added per step so A* prefers clearance but can squeeze through.
+    turn_weight: cost per radian of heading change (1.0 ≈ 1 cell per 57°).
     """
     h, w = costmap.shape
-    g_score: dict[tuple[int, int], float] = {start: 0.0}
-    came_from: dict[tuple[int, int], tuple[int, int] | None] = {start: None}
-    closed: set[tuple[int, int]] = set()
-    heap: list[tuple[float, float, tuple[int, int]]] = []
+    start_dir = min(range(8), key=lambda i: _angle_diff(_DIR_ANGLES[i], start_heading))
+    start_state = (start[0], start[1], start_dir)
 
-    def heur(c: tuple[int, int]) -> float:
-        return math.hypot(c[0] - goal[0], c[1] - goal[1])
+    g_score: dict[tuple[int, int, int], float] = {start_state: 0.0}
+    came_from: dict[tuple[int, int, int], tuple[int, int, int] | None] = {start_state: None}
+    closed: set[tuple[int, int, int]] = set()
+    heap: list[tuple[float, float, tuple[int, int, int]]] = []
 
-    heapq.heappush(heap, (heur(start), 0.0, start))
+    def heur(c: int, r: int) -> float:
+        return math.hypot(c - goal[0], r - goal[1])
+
+    heapq.heappush(heap, (heur(*start), 0.0, start_state))
 
     while heap:
         _, g, cur = heapq.heappop(heap)
         if cur in closed:
             continue
         closed.add(cur)
-        if cur == goal:
+        c, r, d = cur
+        if (c, r) == goal:
             path: list[tuple[int, int]] = []
-            node: tuple[int, int] | None = goal
+            node: tuple[int, int, int] | None = cur
             while node is not None:
-                path.append(node)
+                path.append((node[0], node[1]))
                 node = came_from.get(node)
             return list(reversed(path))
-        for (dc, dr), step in zip(_DIRS, _COSTS):
-            nc, nr = cur[0] + dc, cur[1] + dr
+        for nd, ((dc, dr), step) in enumerate(zip(_DIRS, _COSTS)):
+            nc, nr = c + dc, r + dr
             if not (0 <= nc < w and 0 <= nr < h):
                 continue
             cell_cost = costmap[nr, nc]
             if not math.isfinite(cell_cost):
                 continue
-            ng = g + step + cell_cost
-            if ng < g_score.get((nc, nr), float('inf')):
-                g_score[(nc, nr)] = ng
-                came_from[(nc, nr)] = cur
-                heapq.heappush(heap, (ng + heur((nc, nr)), ng, (nc, nr)))
+            turn = _angle_diff(_DIR_ANGLES[d], _DIR_ANGLES[nd])
+            ng = g + step + cell_cost + turn_weight * turn
+            nstate = (nc, nr, nd)
+            if ng < g_score.get(nstate, float('inf')):
+                g_score[nstate] = ng
+                came_from[nstate] = cur
+                heapq.heappush(heap, (ng + heur(nc, nr), ng, nstate))
     return None
 
 
@@ -131,9 +152,10 @@ class AStarPlanner(Node):
     def __init__(self) -> None:
         super().__init__('astar_planner')
 
-        self.declare_parameter('inflation_radius_m', 0.22)
-        self.declare_parameter('robot_radius_m', 0.10)
-        self.declare_parameter('dyn_inflation_radius_m', 0.08)
+        self.declare_parameter('inflation_radius_m', 0.28)
+        self.declare_parameter('robot_radius_m', 0.13)
+        self.declare_parameter('dyn_inflation_radius_m', 0.10)
+        self.declare_parameter('turn_weight', 1.0)
         self.declare_parameter('map_topic', '/map')
         self.declare_parameter('costmap_topic', '/costmap')
         self.declare_parameter('plan_topic', '/plan')
@@ -150,6 +172,7 @@ class AStarPlanner(Node):
         self._inflate_r = float(self.get_parameter('inflation_radius_m').value)
         self._robot_r = float(self.get_parameter('robot_radius_m').value)
         self._dyn_inflate_r = float(self.get_parameter('dyn_inflation_radius_m').value)
+        self._turn_weight = float(self.get_parameter('turn_weight').value)
         self._smooth_w = int(self.get_parameter('smooth_window').value)
         self._laser_x_m = float(self.get_parameter('laser_x_m').value)
         self._laser_yaw_rad = float(self.get_parameter('laser_yaw_rad').value)
@@ -340,7 +363,9 @@ class AStarPlanner(Node):
             self._publish_status('PLANNING_FAILED', 'start or goal unreachable')
             return
 
-        path_cells = _astar(self._costmap, start_free, goal_free)
+        path_cells = _astar(self._costmap, start_free, goal_free,
+                            start_heading=self._robot_yaw,
+                            turn_weight=self._turn_weight)
 
         if path_cells is None:
             self._publish_status('PLANNING_FAILED', 'no path found')

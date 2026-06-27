@@ -47,6 +47,7 @@ class PurePursuit(Node):
         self.declare_parameter('align_tolerance_rad', 0.087)   # ~5 deg
         self.declare_parameter('align_kp', 1.2)
         self.declare_parameter('v_ramp_start_m', 0.6)         # start slowing
+        self.declare_parameter('rotate_threshold_rad', 0.698)  # 40° — stop-and-turn
         self.declare_parameter('control_rate_hz', 20.0)
         self.declare_parameter('cmd_vel_topic', '/cmd_vel')
         self.declare_parameter('plan_topic', '/plan')
@@ -62,6 +63,7 @@ class PurePursuit(Node):
         self._align_tol = float(self.get_parameter('align_tolerance_rad').value)
         self._align_kp = float(self.get_parameter('align_kp').value)
         self._ramp_d = float(self.get_parameter('v_ramp_start_m').value)
+        self._rotate_thresh = float(self.get_parameter('rotate_threshold_rad').value)
 
         self._state: _State = _State.IDLE
         self._path: list[tuple[float, float]] = []
@@ -155,6 +157,13 @@ class PurePursuit(Node):
         dx = lp[0] - self._robot_x
         dy = lp[1] - self._robot_y
         alpha = _normalize(math.atan2(dy, dx) - self._robot_yaw)
+
+        # Stop-and-turn: if heading error is large, rotate in place before
+        # moving forward so the robot's body doesn't sweep into walls.
+        if abs(alpha) > self._rotate_thresh:
+            omega = math.copysign(self._om_max, alpha)
+            self._publish_cmd(0.0, omega)
+            return
 
         curvature = 2.0 * math.sin(alpha) / self._Ld
 

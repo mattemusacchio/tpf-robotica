@@ -41,8 +41,9 @@ astar_planner:
   ros__parameters:
     inflation_radius_m: 0.28
     robot_radius_m: 0.13
-    dyn_inflation_radius_m: 0.10
-    smooth_window: 5
+    dyn_inflation_radius_m: 0.12
+    turn_weight: 1.0
+    smooth_window: 9
     scan_topic: /scan
     laser_x_m: -0.032
     laser_yaw_rad: 0.0
@@ -51,6 +52,7 @@ astar_planner:
 pure_pursuit:
   ros__parameters:
     lookahead_m: 0.40
+    rotate_threshold_rad: 0.698
     v_max: 0.20
     omega_max: 0.80
     omega_align_max: 0.50
@@ -62,7 +64,7 @@ pure_pursuit:
 
 navigation_sm:
   ros__parameters:
-    obstacle_confirm_hits: 5
+    obstacle_confirm_hits: 2
     obstacle_range_m: 1.0
     obstacle_stop_range_m: 0.7
     obstacle_decay_s: 3.0
