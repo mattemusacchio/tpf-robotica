@@ -9,3 +9,11 @@ data/rosbags/**/*.db3
 # Python cache
 __pycache__/
 *.py[cod]
+
+# Tooling dirs
+.claude/
+.omc/
+
+# Generated frame exports
+*.gv
+frames_*.pdf

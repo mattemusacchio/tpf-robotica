@@ -1,0 +1,47 @@
+# Virtual ArUco landmarks for custom_casa Gazebo world.
+# Coordinates are in the Gazebo world frame (meters).
+# custom_casa layout: outer walls at ±2.95m, internal divider at y=-1.5.
+#   Upper room  (y > -1.5): large open area
+#   Lower-left  (x < 0, y < -1.5)
+#   Lower-right (x > 0, y < -1.5)
+
+landmarks:
+  # --- upper room (6 landmarks) ---
+  - id: 0
+    x: -2.2
+    y:  2.2
+  - id: 1
+    x:  0.0
+    y:  2.5
+  - id: 2
+    x:  2.2
+    y:  2.2
+  - id: 3
+    x: -2.2
+    y:  0.2
+  - id: 4
+    x:  0.5
+    y:  0.5
+  - id: 5
+    x:  2.5
+    y:  0.2
+  # --- lower-left room (3 landmarks) ---
+  - id: 6
+    x: -2.0
+    y: -2.5
+  - id: 7
+    x: -1.5
+    y: -1.8
+  - id: 8
+    x: -0.4
+    y: -2.5
+  # --- lower-right room (3 landmarks) ---
+  - id: 9
+    x:  0.5
+    y: -1.8
+  - id: 10
+    x:  1.5
+    y: -2.5
+  - id: 11
+    x:  2.5
+    y: -2.0

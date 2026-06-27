@@ -37,6 +37,7 @@ class ProgressiveMappingDemoNode(Node):
 
         self.declare_parameter('bag_path', 'data/rosbags/laberinto')
         self.declare_parameter('optimized_graph_path', 'log/laberinto_optimized_graph.json')
+        self.declare_parameter('scan_topic', '/tb4_0/scan')
         self.declare_parameter('map_topic', '/map')
         self.declare_parameter('path_topic', '/slam/demo_path')
         self.declare_parameter('landmarks_topic', '/slam/demo_landmarks')
@@ -49,6 +50,9 @@ class ProgressiveMappingDemoNode(Node):
         self.declare_parameter('beam_stride', 10)
         self.declare_parameter('inflate_radius_m', 0.08)
         self.declare_parameter('min_occupied_component_cells', 4)
+        self.declare_parameter('min_hits_for_occupied', 2)
+        self.declare_parameter('log_odds_occupied', 0.85)
+        self.declare_parameter('log_odds_free', -0.35)
         self.declare_parameter('use_tf_static', False)
         self.declare_parameter('laser_x_m', -0.04)
         self.declare_parameter('laser_y_m', 0.0)
@@ -101,12 +105,16 @@ class ProgressiveMappingDemoNode(Node):
 
     def _create_builder(self) -> OccupancyGridBuilder:
         config = MappingConfig(
+            scan_topic=str(self.get_parameter('scan_topic').value),
             resolution=float(self.get_parameter('resolution').value),
             max_range_m=float(self.get_parameter('max_range_m').value),
             scan_stride=max(1, int(self.get_parameter('scan_stride').value)),
             beam_stride=max(1, int(self.get_parameter('beam_stride').value)),
             inflate_radius_m=max(0.0, float(self.get_parameter('inflate_radius_m').value)),
             min_occupied_component_cells=max(0, int(self.get_parameter('min_occupied_component_cells').value)),
+            min_hits_for_occupied=max(1, int(self.get_parameter('min_hits_for_occupied').value)),
+            log_odds_occupied=float(self.get_parameter('log_odds_occupied').value),
+            log_odds_free=float(self.get_parameter('log_odds_free').value),
             use_tf_static=bool(self.get_parameter('use_tf_static').value),
             laser_x_m=float(self.get_parameter('laser_x_m').value),
             laser_y_m=float(self.get_parameter('laser_y_m').value),
