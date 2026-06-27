@@ -3,6 +3,11 @@
 Subscribes to /map for the occupancy grid, inflates obstacles by a configurable
 radius, then plans 8-directional A* paths from the current pose estimate to any
 goal published on /goal_pose.  Replanning triggers immediately on new goals.
+
+Dynamic obstacle layer: laser scan hits are projected to map frame and merged
+with the static map before inflation so uncharted obstacles (e.g. table legs)
+are avoided.  The layer is refreshed every scan; replanning is throttled to
+dyn_replan_hz to avoid replanning at full scan rate.
 """
 
 from __future__ import annotations
@@ -19,12 +24,14 @@ from nav_msgs.msg import OccupancyGrid, Path
 from rclpy.node import Node
 from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
                         ReliabilityPolicy)
-from scipy.ndimage import binary_dilation, generate_binary_structure
+from scipy.ndimage import distance_transform_edt
+from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker
 
 
 _SQRT2 = math.sqrt(2.0)
+_MAX_TERRAIN_COST = 5.0  # max A* step penalty at lethal boundary
 
 _MAP_QOS = QoSProfile(
     durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -35,55 +42,81 @@ _MAP_QOS = QoSProfile(
 _DIRS = [(1, 0), (-1, 0), (0, 1), (0, -1),
          (1, 1), (1, -1), (-1, 1), (-1, -1)]
 _COSTS = [1.0, 1.0, 1.0, 1.0, _SQRT2, _SQRT2, _SQRT2, _SQRT2]
+# Heading angle for each direction in _DIRS (radians)
+_DIR_ANGLES = [0.0, math.pi, math.pi / 2, -math.pi / 2,
+               math.pi / 4, -math.pi / 4, 3 * math.pi / 4, -3 * math.pi / 4]
 
 
-def _astar(blocked: np.ndarray,
+def _angle_diff(a: float, b: float) -> float:
+    """Shortest angular distance between two angles, in [0, π]."""
+    d = abs(a - b) % (2 * math.pi)
+    return min(d, 2 * math.pi - d)
+
+
+def _astar(costmap: np.ndarray,
            start: tuple[int, int],
-           goal: tuple[int, int]) -> list[tuple[int, int]] | None:
-    """Return list of (col, row) from start to goal, or None if unreachable."""
-    h, w = blocked.shape
-    g_score: dict[tuple[int, int], float] = {start: 0.0}
-    came_from: dict[tuple[int, int], tuple[int, int] | None] = {start: None}
-    closed: set[tuple[int, int]] = set()
-    heap: list[tuple[float, float, tuple[int, int]]] = []
+           goal: tuple[int, int],
+           start_heading: float = 0.0,
+           turn_weight: float = 1.0) -> list[tuple[int, int]] | None:
+    """Return list of (col, row) from start to goal, or None if unreachable.
 
-    def heur(c: tuple[int, int]) -> float:
-        return math.hypot(c[0] - goal[0], c[1] - goal[1])
+    State: (col, row, dir_idx) — heading-aware so A* penalises sharp turns.
+    This models the non-holonomic constraint: paths with gentle curves are
+    preferred over geometrically shorter paths that require U-turns.
 
-    heapq.heappush(heap, (heur(start), 0.0, start))
+    costmap: float array — inf=lethal, 0=free, gradient in between.
+    turn_weight: cost per radian of heading change (1.0 ≈ 1 cell per 57°).
+    """
+    h, w = costmap.shape
+    start_dir = min(range(8), key=lambda i: _angle_diff(_DIR_ANGLES[i], start_heading))
+    start_state = (start[0], start[1], start_dir)
+
+    g_score: dict[tuple[int, int, int], float] = {start_state: 0.0}
+    came_from: dict[tuple[int, int, int], tuple[int, int, int] | None] = {start_state: None}
+    closed: set[tuple[int, int, int]] = set()
+    heap: list[tuple[float, float, tuple[int, int, int]]] = []
+
+    def heur(c: int, r: int) -> float:
+        return math.hypot(c - goal[0], r - goal[1])
+
+    heapq.heappush(heap, (heur(*start), 0.0, start_state))
 
     while heap:
         _, g, cur = heapq.heappop(heap)
         if cur in closed:
             continue
         closed.add(cur)
-        if cur == goal:
+        c, r, d = cur
+        if (c, r) == goal:
             path: list[tuple[int, int]] = []
-            node: tuple[int, int] | None = goal
+            node: tuple[int, int, int] | None = cur
             while node is not None:
-                path.append(node)
+                path.append((node[0], node[1]))
                 node = came_from.get(node)
             return list(reversed(path))
-        for (dc, dr), cost in zip(_DIRS, _COSTS):
-            nc, nr = cur[0] + dc, cur[1] + dr
+        for nd, ((dc, dr), step) in enumerate(zip(_DIRS, _COSTS)):
+            nc, nr = c + dc, r + dr
             if not (0 <= nc < w and 0 <= nr < h):
                 continue
-            if blocked[nr, nc]:
+            cell_cost = costmap[nr, nc]
+            if not math.isfinite(cell_cost):
                 continue
-            ng = g + cost
-            if ng < g_score.get((nc, nr), float('inf')):
-                g_score[(nc, nr)] = ng
-                came_from[(nc, nr)] = cur
-                heapq.heappush(heap, (ng + heur((nc, nr)), ng, (nc, nr)))
+            turn = _angle_diff(_DIR_ANGLES[d], _DIR_ANGLES[nd])
+            ng = g + step + cell_cost + turn_weight * turn
+            nstate = (nc, nr, nd)
+            if ng < g_score.get(nstate, float('inf')):
+                g_score[nstate] = ng
+                came_from[nstate] = cur
+                heapq.heappush(heap, (ng + heur(nc, nr), ng, nstate))
     return None
 
 
-def _snap_to_free(blocked: np.ndarray,
+def _snap_to_free(costmap: np.ndarray,
                   col: int, row: int,
                   max_search: int = 30) -> tuple[int, int] | None:
-    """Return nearest free cell to (col, row) via BFS, or None if not found."""
-    h, w = blocked.shape
-    if 0 <= row < h and 0 <= col < w and not blocked[row, col]:
+    """Return nearest traversable cell to (col, row) via BFS, or None if not found."""
+    h, w = costmap.shape
+    if 0 <= row < h and 0 <= col < w and math.isfinite(costmap[row, col]):
         return col, row
     visited: set[tuple[int, int]] = set()
     queue = [(col, row)]
@@ -97,7 +130,7 @@ def _snap_to_free(blocked: np.ndarray,
                 visited.add((nc, nr))
                 if not (0 <= nc < w and 0 <= nr < h):
                     continue
-                if not blocked[nr, nc]:
+                if math.isfinite(costmap[nr, nc]):
                     return nc, nr
                 if abs(nc - col) <= max_search and abs(nr - row) <= max_search:
                     next_q.append((nc, nr))
@@ -119,7 +152,10 @@ class AStarPlanner(Node):
     def __init__(self) -> None:
         super().__init__('astar_planner')
 
-        self.declare_parameter('inflation_radius_m', 0.20)
+        self.declare_parameter('inflation_radius_m', 0.28)
+        self.declare_parameter('robot_radius_m', 0.13)
+        self.declare_parameter('dyn_inflation_radius_m', 0.10)
+        self.declare_parameter('turn_weight', 1.0)
         self.declare_parameter('map_topic', '/map')
         self.declare_parameter('costmap_topic', '/costmap')
         self.declare_parameter('plan_topic', '/plan')
@@ -127,19 +163,32 @@ class AStarPlanner(Node):
         self.declare_parameter('pose_topic', '/pose_estimate')
         self.declare_parameter('nav_status_topic', '/nav_status')
         self.declare_parameter('smooth_window', 5)
+        # dynamic obstacle layer
+        self.declare_parameter('scan_topic', '/scan')
+        self.declare_parameter('laser_x_m', -0.032)
+        self.declare_parameter('laser_yaw_rad', 0.0)
+        self.declare_parameter('dyn_replan_hz', 1.0)
 
         self._inflate_r = float(self.get_parameter('inflation_radius_m').value)
+        self._robot_r = float(self.get_parameter('robot_radius_m').value)
+        self._dyn_inflate_r = float(self.get_parameter('dyn_inflation_radius_m').value)
+        self._turn_weight = float(self.get_parameter('turn_weight').value)
         self._smooth_w = int(self.get_parameter('smooth_window').value)
+        self._laser_x_m = float(self.get_parameter('laser_x_m').value)
+        self._laser_yaw_rad = float(self.get_parameter('laser_yaw_rad').value)
 
         self._map_info: Any = None
-        self._blocked: np.ndarray | None = None   # raw obstacle mask
-        self._costmap: np.ndarray | None = None   # inflated mask (True=blocked)
+        self._blocked: np.ndarray | None = None      # static obstacle mask
+        self._dynamic_blocked: np.ndarray | None = None  # laser-hit mask (confirmed)
+        self._prev_dyn_scan: np.ndarray | None = None    # previous scan hits (unconfirmed)
+        self._costmap: np.ndarray | None = None      # inflated combined mask
 
         self._robot_x: float = 0.0
         self._robot_y: float = 0.0
         self._robot_yaw: float = 0.0
 
         self._goal: PoseStamped | None = None
+        self._dyn_changed: bool = False
 
         self._costmap_pub = self.create_publisher(
             OccupancyGrid,
@@ -165,6 +214,13 @@ class AStarPlanner(Node):
             PoseStamped,
             str(self.get_parameter('goal_topic').value),
             self._on_goal, 10)
+        self.create_subscription(
+            LaserScan,
+            str(self.get_parameter('scan_topic').value),
+            self._on_scan, 10)
+
+        dyn_period = 1.0 / max(0.1, float(self.get_parameter('dyn_replan_hz').value))
+        self.create_timer(dyn_period, self._dyn_replan_cb)
 
         self.get_logger().info('A* planner ready')
 
@@ -183,14 +239,29 @@ class AStarPlanner(Node):
     def _build_costmap(self) -> None:
         if self._blocked is None or self._map_info is None:
             return
-        radius_cells = int(math.ceil(self._inflate_r / self._map_info.resolution))
-        struct = np.zeros((2 * radius_cells + 1, 2 * radius_cells + 1), dtype=bool)
-        cy = cx = radius_cells
-        for r in range(struct.shape[0]):
-            for c in range(struct.shape[1]):
-                if math.hypot(r - cy, c - cx) <= radius_cells:
-                    struct[r, c] = True
-        self._costmap = binary_dilation(self._blocked, structure=struct)
+        res = self._map_info.resolution
+
+        # Distance from nearest static obstacle in metres
+        dist = distance_transform_edt(~self._blocked) * res
+
+        costmap = np.zeros(self._blocked.shape, dtype=float)
+
+        # Lethal zone: within robot_radius → inf
+        costmap[dist < self._robot_r] = math.inf
+
+        # Gradient zone: exponential decay from robot_r to inflate_r
+        span = self._inflate_r - self._robot_r
+        if span > 0:
+            grad_mask = (dist >= self._robot_r) & (dist < self._inflate_r)
+            d = dist[grad_mask]
+            costmap[grad_mask] = _MAX_TERRAIN_COST * np.exp(-3.0 * (d - self._robot_r) / span)
+
+        # Dynamic obstacles: lethal within dyn_inflate_r
+        if self._dynamic_blocked is not None and self._dynamic_blocked.any():
+            dist_dyn = distance_transform_edt(~self._dynamic_blocked) * res
+            costmap[dist_dyn < self._dyn_inflate_r] = math.inf
+
+        self._costmap = costmap
 
     def _publish_costmap(self) -> None:
         if self._costmap is None or self._map_info is None:
@@ -199,9 +270,58 @@ class AStarPlanner(Node):
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'map'
         msg.info = self._map_info
-        flat = self._costmap.astype(np.int8) * 100
-        msg.data = flat.flatten().tolist()
+        # inf → 100, gradient → 1-99 proportional, free → 0
+        vis = np.where(
+            np.isinf(self._costmap), 100,
+            np.clip(self._costmap / _MAX_TERRAIN_COST * 99, 0, 99)
+        ).astype(np.int8)
+        msg.data = vis.flatten().tolist()
         self._costmap_pub.publish(msg)
+
+    # ------------------------------------------------------------------
+    # Dynamic obstacle layer
+    # ------------------------------------------------------------------
+
+    def _on_scan(self, msg: LaserScan) -> None:
+        if self._map_info is None or self._blocked is None:
+            return
+        h, w = self._blocked.shape
+        new_dyn = np.zeros((h, w), dtype=bool)
+
+        cos_r = math.cos(self._robot_yaw)
+        sin_r = math.sin(self._robot_yaw)
+        # laser origin in world frame
+        lx = self._robot_x + self._laser_x_m * cos_r
+        ly = self._robot_y + self._laser_x_m * sin_r
+
+        angle = msg.angle_min
+        for r in msg.ranges:
+            if msg.range_min < r < msg.range_max:
+                world_angle = angle + self._robot_yaw + self._laser_yaw_rad
+                hx = lx + r * math.cos(world_angle)
+                hy = ly + r * math.sin(world_angle)
+                col, row = self._world_to_cell(hx, hy)
+                if 0 <= col < w and 0 <= row < h:
+                    new_dyn[row, col] = True
+            angle += msg.angle_increment
+
+        # Require hit in 2 consecutive scans to filter single-frame pose glitches
+        if self._prev_dyn_scan is not None:
+            confirmed = new_dyn & self._prev_dyn_scan
+        else:
+            confirmed = np.zeros_like(new_dyn)
+        self._prev_dyn_scan = new_dyn
+
+        if self._dynamic_blocked is None or not np.array_equal(confirmed, self._dynamic_blocked):
+            self._dynamic_blocked = confirmed
+            self._dyn_changed = True
+
+    def _dyn_replan_cb(self) -> None:
+        if self._dyn_changed and self._goal is not None and self._blocked is not None:
+            self._build_costmap()
+            self._publish_costmap()
+            self._do_plan()
+            self._dyn_changed = False
 
     # ------------------------------------------------------------------
     # Pose + goal
@@ -251,7 +371,9 @@ class AStarPlanner(Node):
             self._publish_status('PLANNING_FAILED', 'start or goal unreachable')
             return
 
-        path_cells = _astar(self._costmap, start_free, goal_free)
+        path_cells = _astar(self._costmap, start_free, goal_free,
+                            start_heading=self._robot_yaw,
+                            turn_weight=self._turn_weight)
 
         if path_cells is None:
             self._publish_status('PLANNING_FAILED', 'no path found')

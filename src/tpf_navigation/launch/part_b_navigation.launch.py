@@ -40,10 +40,11 @@ def generate_launch_description():
         DeclareLaunchArgument('rviz', default_value='true'),
         DeclareLaunchArgument('use_sim_time', default_value='true'),
 
-        # ── Gazebo simulation ─────────────────────────────────────────
+        # ── Gazebo simulation (headless — gzserver only; gzclient crashes on WSL) ─
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
-                os.path.join(sim_pkg, 'launch', 'custom_casa.launch.py')),
+                os.path.join(get_package_share_directory('tpf_navigation'),
+                             'launch', 'casa_headless_sim.launch.py')),
         ),
 
         # ── Map server (static occupancy map) ────────────────────────

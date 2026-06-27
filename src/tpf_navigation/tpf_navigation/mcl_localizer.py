@@ -71,9 +71,9 @@ class MCLLocalizer(Node):
         self.declare_parameter('lidar_weight', 1.0)
         self.declare_parameter('z_rand', 0.15)  # uniform mixture fraction; prevents weight collapse on unmapped obstacles
         # Laser mount offset — must match the values used during SLAM
-        self.declare_parameter('laser_x_m', -0.04)
+        self.declare_parameter('laser_x_m', -0.032)
         self.declare_parameter('laser_y_m', 0.0)
-        self.declare_parameter('laser_yaw_rad', 1.5707963267948966)  # π/2
+        self.declare_parameter('laser_yaw_rad', 0.0)
         # Landmark model
         self.declare_parameter('lm_sigma_range', 0.15)
         self.declare_parameter('lm_sigma_bearing', 0.10)
@@ -81,6 +81,10 @@ class MCLLocalizer(Node):
         # Publish
         self.declare_parameter('publish_rate_hz', 10.0)
         self.declare_parameter('lost_var_thresh', 2.0)  # m² variance → LOST
+        # Initial pose — seeds particles near known spawn instead of uniformly
+        self.declare_parameter('init_x_m', 0.0)
+        self.declare_parameter('init_y_m', 0.0)
+        self.declare_parameter('init_pos_std_m', 0.0)  # 0 = uniform over map
 
         self._N = int(self.get_parameter('num_particles').value)
         self._alpha = [
@@ -179,7 +183,11 @@ class MCLLocalizer(Node):
         ])
 
         if self._particles is None:
-            self._init_uniform()
+            init_std = float(self.get_parameter('init_pos_std_m').value)
+            if init_std > 0.0:
+                self._init_near_pose()
+            else:
+                self._init_uniform()
         self.get_logger().info(
             f'Map received {msg.info.width}x{msg.info.height}; '
             f'{len(self._free_cells)} free cells', once=True)
@@ -192,6 +200,18 @@ class MCLLocalizer(Node):
         theta = np.random.uniform(-math.pi, math.pi, self._N)
         self._particles = np.column_stack([xy, theta])
         self._weights = np.ones(self._N) / self._N
+
+    def _init_near_pose(self) -> None:
+        cx = float(self.get_parameter('init_x_m').value)
+        cy = float(self.get_parameter('init_y_m').value)
+        std = float(self.get_parameter('init_pos_std_m').value)
+        xs = np.random.normal(cx, std, self._N)
+        ys = np.random.normal(cy, std, self._N)
+        thetas = np.random.uniform(-math.pi, math.pi, self._N)
+        self._particles = np.column_stack([xs, ys, thetas])
+        self._weights = np.ones(self._N) / self._N
+        self.get_logger().info(
+            f'Particles initialized near ({cx:.2f}, {cy:.2f}) ±{std:.2f}m')
 
     # ------------------------------------------------------------------
     # Initial pose
@@ -237,7 +257,13 @@ class MCLLocalizer(Node):
         trans = math.hypot(dx, dy)
 
         if trans < 0.001 and abs(dtheta) < 0.001:
-            return  # robot not moving — skip predict to avoid particle spread
+            # Robot stationary: skip motion model but still apply sensor update.
+            # Without this, particles never converge when the robot starts at rest.
+            if self._pending_lidar is not None:
+                self._update_lidar(self._pending_lidar)
+                self._pending_lidar = None
+                self._normalize_and_resample()
+            return
 
         self._predict(dx, dy, dtheta, trans)
         self._prev_odom = (self._odom_x, self._odom_y, self._odom_yaw)
