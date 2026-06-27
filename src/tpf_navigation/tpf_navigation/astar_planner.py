@@ -179,7 +179,8 @@ class AStarPlanner(Node):
 
         self._map_info: Any = None
         self._blocked: np.ndarray | None = None      # static obstacle mask
-        self._dynamic_blocked: np.ndarray | None = None  # laser-hit mask
+        self._dynamic_blocked: np.ndarray | None = None  # laser-hit mask (confirmed)
+        self._prev_dyn_scan: np.ndarray | None = None    # previous scan hits (unconfirmed)
         self._costmap: np.ndarray | None = None      # inflated combined mask
 
         self._robot_x: float = 0.0
@@ -304,8 +305,15 @@ class AStarPlanner(Node):
                     new_dyn[row, col] = True
             angle += msg.angle_increment
 
-        if self._dynamic_blocked is None or not np.array_equal(new_dyn, self._dynamic_blocked):
-            self._dynamic_blocked = new_dyn
+        # Require hit in 2 consecutive scans to filter single-frame pose glitches
+        if self._prev_dyn_scan is not None:
+            confirmed = new_dyn & self._prev_dyn_scan
+        else:
+            confirmed = np.zeros_like(new_dyn)
+        self._prev_dyn_scan = new_dyn
+
+        if self._dynamic_blocked is None or not np.array_equal(confirmed, self._dynamic_blocked):
+            self._dynamic_blocked = confirmed
             self._dyn_changed = True
 
     def _dyn_replan_cb(self) -> None:
