@@ -41,6 +41,10 @@ astar_planner:
   ros__parameters:
     inflation_radius_m: 0.35
     smooth_window: 5
+    scan_topic: /scan
+    laser_x_m: -0.032
+    laser_yaw_rad: 0.0
+    dyn_replan_hz: 1.0
 
 pure_pursuit:
   ros__parameters:

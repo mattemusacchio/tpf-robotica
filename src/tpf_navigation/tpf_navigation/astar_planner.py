@@ -3,6 +3,11 @@
 Subscribes to /map for the occupancy grid, inflates obstacles by a configurable
 radius, then plans 8-directional A* paths from the current pose estimate to any
 goal published on /goal_pose.  Replanning triggers immediately on new goals.
+
+Dynamic obstacle layer: laser scan hits are projected to map frame and merged
+with the static map before inflation so uncharted obstacles (e.g. table legs)
+are avoided.  The layer is refreshed every scan; replanning is throttled to
+dyn_replan_hz to avoid replanning at full scan rate.
 """
 
 from __future__ import annotations
@@ -19,7 +24,8 @@ from nav_msgs.msg import OccupancyGrid, Path
 from rclpy.node import Node
 from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
                         ReliabilityPolicy)
-from scipy.ndimage import binary_dilation, generate_binary_structure
+from scipy.ndimage import binary_dilation
+from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker
 
@@ -127,19 +133,28 @@ class AStarPlanner(Node):
         self.declare_parameter('pose_topic', '/pose_estimate')
         self.declare_parameter('nav_status_topic', '/nav_status')
         self.declare_parameter('smooth_window', 5)
+        # dynamic obstacle layer
+        self.declare_parameter('scan_topic', '/scan')
+        self.declare_parameter('laser_x_m', -0.032)
+        self.declare_parameter('laser_yaw_rad', 0.0)
+        self.declare_parameter('dyn_replan_hz', 1.0)
 
         self._inflate_r = float(self.get_parameter('inflation_radius_m').value)
         self._smooth_w = int(self.get_parameter('smooth_window').value)
+        self._laser_x_m = float(self.get_parameter('laser_x_m').value)
+        self._laser_yaw_rad = float(self.get_parameter('laser_yaw_rad').value)
 
         self._map_info: Any = None
-        self._blocked: np.ndarray | None = None   # raw obstacle mask
-        self._costmap: np.ndarray | None = None   # inflated mask (True=blocked)
+        self._blocked: np.ndarray | None = None      # static obstacle mask
+        self._dynamic_blocked: np.ndarray | None = None  # laser-hit mask
+        self._costmap: np.ndarray | None = None      # inflated combined mask
 
         self._robot_x: float = 0.0
         self._robot_y: float = 0.0
         self._robot_yaw: float = 0.0
 
         self._goal: PoseStamped | None = None
+        self._dyn_changed: bool = False
 
         self._costmap_pub = self.create_publisher(
             OccupancyGrid,
@@ -165,6 +180,13 @@ class AStarPlanner(Node):
             PoseStamped,
             str(self.get_parameter('goal_topic').value),
             self._on_goal, 10)
+        self.create_subscription(
+            LaserScan,
+            str(self.get_parameter('scan_topic').value),
+            self._on_scan, 10)
+
+        dyn_period = 1.0 / max(0.1, float(self.get_parameter('dyn_replan_hz').value))
+        self.create_timer(dyn_period, self._dyn_replan_cb)
 
         self.get_logger().info('A* planner ready')
 
@@ -183,6 +205,9 @@ class AStarPlanner(Node):
     def _build_costmap(self) -> None:
         if self._blocked is None or self._map_info is None:
             return
+        combined = self._blocked.copy()
+        if self._dynamic_blocked is not None:
+            combined |= self._dynamic_blocked
         radius_cells = int(math.ceil(self._inflate_r / self._map_info.resolution))
         struct = np.zeros((2 * radius_cells + 1, 2 * radius_cells + 1), dtype=bool)
         cy = cx = radius_cells
@@ -190,7 +215,7 @@ class AStarPlanner(Node):
             for c in range(struct.shape[1]):
                 if math.hypot(r - cy, c - cx) <= radius_cells:
                     struct[r, c] = True
-        self._costmap = binary_dilation(self._blocked, structure=struct)
+        self._costmap = binary_dilation(combined, structure=struct)
 
     def _publish_costmap(self) -> None:
         if self._costmap is None or self._map_info is None:
@@ -202,6 +227,44 @@ class AStarPlanner(Node):
         flat = self._costmap.astype(np.int8) * 100
         msg.data = flat.flatten().tolist()
         self._costmap_pub.publish(msg)
+
+    # ------------------------------------------------------------------
+    # Dynamic obstacle layer
+    # ------------------------------------------------------------------
+
+    def _on_scan(self, msg: LaserScan) -> None:
+        if self._map_info is None or self._blocked is None:
+            return
+        h, w = self._blocked.shape
+        new_dyn = np.zeros((h, w), dtype=bool)
+
+        cos_r = math.cos(self._robot_yaw)
+        sin_r = math.sin(self._robot_yaw)
+        # laser origin in world frame
+        lx = self._robot_x + self._laser_x_m * cos_r
+        ly = self._robot_y + self._laser_x_m * sin_r
+
+        angle = msg.angle_min
+        for r in msg.ranges:
+            if msg.range_min < r < msg.range_max:
+                world_angle = angle + self._robot_yaw + self._laser_yaw_rad
+                hx = lx + r * math.cos(world_angle)
+                hy = ly + r * math.sin(world_angle)
+                col, row = self._world_to_cell(hx, hy)
+                if 0 <= col < w and 0 <= row < h:
+                    new_dyn[row, col] = True
+            angle += msg.angle_increment
+
+        if self._dynamic_blocked is None or not np.array_equal(new_dyn, self._dynamic_blocked):
+            self._dynamic_blocked = new_dyn
+            self._dyn_changed = True
+
+    def _dyn_replan_cb(self) -> None:
+        if self._dyn_changed and self._goal is not None and self._blocked is not None:
+            self._build_costmap()
+            self._publish_costmap()
+            self._do_plan()
+            self._dyn_changed = False
 
     # ------------------------------------------------------------------
     # Pose + goal
