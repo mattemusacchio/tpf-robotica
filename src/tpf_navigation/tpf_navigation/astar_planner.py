@@ -180,8 +180,9 @@ class AStarPlanner(Node):
         self._map_info: Any = None
         self._blocked: np.ndarray | None = None      # static obstacle mask
         self._dynamic_blocked: np.ndarray | None = None  # laser-hit mask (confirmed)
-        self._prev_dyn_scan: np.ndarray | None = None    # previous scan hits (unconfirmed)
+        self._dyn_scan_history: list[np.ndarray] = []    # last 3 raw scan masks
         self._costmap: np.ndarray | None = None      # inflated combined mask
+        self._last_path_cells: list[tuple[int, int]] = []
 
         self._robot_x: float = 0.0
         self._robot_y: float = 0.0
@@ -305,23 +306,40 @@ class AStarPlanner(Node):
                     new_dyn[row, col] = True
             angle += msg.angle_increment
 
-        # Require hit in 2 consecutive scans to filter single-frame pose glitches
-        if self._prev_dyn_scan is not None:
-            confirmed = new_dyn & self._prev_dyn_scan
+        # Majority vote over last 3 scans: cell confirmed if hit in ≥2 of 3.
+        # Filters single-frame and double-frame MCL pose-jump artifacts.
+        self._dyn_scan_history.append(new_dyn)
+        if len(self._dyn_scan_history) > 3:
+            self._dyn_scan_history.pop(0)
+
+        if len(self._dyn_scan_history) >= 2:
+            a, b = self._dyn_scan_history[-1], self._dyn_scan_history[-2]
+            if len(self._dyn_scan_history) >= 3:
+                c = self._dyn_scan_history[-3]
+                confirmed = (a & b) | (b & c) | (a & c)
+            else:
+                confirmed = a & b
         else:
             confirmed = np.zeros_like(new_dyn)
-        self._prev_dyn_scan = new_dyn
 
         if self._dynamic_blocked is None or not np.array_equal(confirmed, self._dynamic_blocked):
             self._dynamic_blocked = confirmed
             self._dyn_changed = True
 
+    def _path_still_valid(self) -> bool:
+        """Return True if every cell in the last known path is traversable."""
+        if self._costmap is None or not self._last_path_cells:
+            return False
+        return all(math.isfinite(self._costmap[r, c]) for c, r in self._last_path_cells)
+
     def _dyn_replan_cb(self) -> None:
-        if self._dyn_changed and self._goal is not None and self._blocked is not None:
-            self._build_costmap()
-            self._publish_costmap()
+        if not self._dyn_changed or self._goal is None or self._blocked is None:
+            return
+        self._build_costmap()
+        self._publish_costmap()
+        self._dyn_changed = False
+        if not self._path_still_valid():
             self._do_plan()
-            self._dyn_changed = False
 
     # ------------------------------------------------------------------
     # Pose + goal
@@ -379,6 +397,8 @@ class AStarPlanner(Node):
             self._publish_status('PLANNING_FAILED', 'no path found')
             self.get_logger().warn('A*: no path found')
             return
+
+        self._last_path_cells = path_cells
 
         xs = [self._cell_to_world(c, r)[0] for c, r in path_cells]
         ys = [self._cell_to_world(c, r)[1] for c, r in path_cells]
