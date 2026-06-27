@@ -41,7 +41,7 @@ astar_planner:
   ros__parameters:
     inflation_radius_m: 0.28
     robot_radius_m: 0.13
-    dyn_inflation_radius_m: 0.12
+    dyn_inflation_radius_m: 0.22
     turn_weight: 1.0
     smooth_window: 9
     scan_topic: /scan
