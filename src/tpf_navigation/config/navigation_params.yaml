@@ -39,7 +39,9 @@ mcl_localizer:
 
 astar_planner:
   ros__parameters:
-    inflation_radius_m: 0.35
+    inflation_radius_m: 0.28
+    robot_radius_m: 0.13
+    dyn_inflation_radius_m: 0.10
     smooth_window: 5
     scan_topic: /scan
     laser_x_m: -0.032

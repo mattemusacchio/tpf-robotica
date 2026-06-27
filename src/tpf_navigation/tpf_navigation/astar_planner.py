@@ -24,13 +24,14 @@ from nav_msgs.msg import OccupancyGrid, Path
 from rclpy.node import Node
 from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
                         ReliabilityPolicy)
-from scipy.ndimage import binary_dilation
+from scipy.ndimage import distance_transform_edt
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker
 
 
 _SQRT2 = math.sqrt(2.0)
+_MAX_TERRAIN_COST = 5.0  # max A* step penalty at lethal boundary
 
 _MAP_QOS = QoSProfile(
     durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -43,11 +44,15 @@ _DIRS = [(1, 0), (-1, 0), (0, 1), (0, -1),
 _COSTS = [1.0, 1.0, 1.0, 1.0, _SQRT2, _SQRT2, _SQRT2, _SQRT2]
 
 
-def _astar(blocked: np.ndarray,
+def _astar(costmap: np.ndarray,
            start: tuple[int, int],
            goal: tuple[int, int]) -> list[tuple[int, int]] | None:
-    """Return list of (col, row) from start to goal, or None if unreachable."""
-    h, w = blocked.shape
+    """Return list of (col, row) from start to goal, or None if unreachable.
+
+    costmap: float array — inf=lethal, 0=free, gradient in between.
+    Terrain cost added per step so A* prefers clearance but can squeeze through.
+    """
+    h, w = costmap.shape
     g_score: dict[tuple[int, int], float] = {start: 0.0}
     came_from: dict[tuple[int, int], tuple[int, int] | None] = {start: None}
     closed: set[tuple[int, int]] = set()
@@ -70,13 +75,14 @@ def _astar(blocked: np.ndarray,
                 path.append(node)
                 node = came_from.get(node)
             return list(reversed(path))
-        for (dc, dr), cost in zip(_DIRS, _COSTS):
+        for (dc, dr), step in zip(_DIRS, _COSTS):
             nc, nr = cur[0] + dc, cur[1] + dr
             if not (0 <= nc < w and 0 <= nr < h):
                 continue
-            if blocked[nr, nc]:
+            cell_cost = costmap[nr, nc]
+            if not math.isfinite(cell_cost):
                 continue
-            ng = g + cost
+            ng = g + step + cell_cost
             if ng < g_score.get((nc, nr), float('inf')):
                 g_score[(nc, nr)] = ng
                 came_from[(nc, nr)] = cur
@@ -84,12 +90,12 @@ def _astar(blocked: np.ndarray,
     return None
 
 
-def _snap_to_free(blocked: np.ndarray,
+def _snap_to_free(costmap: np.ndarray,
                   col: int, row: int,
                   max_search: int = 30) -> tuple[int, int] | None:
-    """Return nearest free cell to (col, row) via BFS, or None if not found."""
-    h, w = blocked.shape
-    if 0 <= row < h and 0 <= col < w and not blocked[row, col]:
+    """Return nearest traversable cell to (col, row) via BFS, or None if not found."""
+    h, w = costmap.shape
+    if 0 <= row < h and 0 <= col < w and math.isfinite(costmap[row, col]):
         return col, row
     visited: set[tuple[int, int]] = set()
     queue = [(col, row)]
@@ -103,7 +109,7 @@ def _snap_to_free(blocked: np.ndarray,
                 visited.add((nc, nr))
                 if not (0 <= nc < w and 0 <= nr < h):
                     continue
-                if not blocked[nr, nc]:
+                if math.isfinite(costmap[nr, nc]):
                     return nc, nr
                 if abs(nc - col) <= max_search and abs(nr - row) <= max_search:
                     next_q.append((nc, nr))
@@ -125,7 +131,9 @@ class AStarPlanner(Node):
     def __init__(self) -> None:
         super().__init__('astar_planner')
 
-        self.declare_parameter('inflation_radius_m', 0.20)
+        self.declare_parameter('inflation_radius_m', 0.22)
+        self.declare_parameter('robot_radius_m', 0.10)
+        self.declare_parameter('dyn_inflation_radius_m', 0.08)
         self.declare_parameter('map_topic', '/map')
         self.declare_parameter('costmap_topic', '/costmap')
         self.declare_parameter('plan_topic', '/plan')
@@ -140,6 +148,8 @@ class AStarPlanner(Node):
         self.declare_parameter('dyn_replan_hz', 1.0)
 
         self._inflate_r = float(self.get_parameter('inflation_radius_m').value)
+        self._robot_r = float(self.get_parameter('robot_radius_m').value)
+        self._dyn_inflate_r = float(self.get_parameter('dyn_inflation_radius_m').value)
         self._smooth_w = int(self.get_parameter('smooth_window').value)
         self._laser_x_m = float(self.get_parameter('laser_x_m').value)
         self._laser_yaw_rad = float(self.get_parameter('laser_yaw_rad').value)
@@ -205,17 +215,29 @@ class AStarPlanner(Node):
     def _build_costmap(self) -> None:
         if self._blocked is None or self._map_info is None:
             return
-        combined = self._blocked.copy()
-        if self._dynamic_blocked is not None:
-            combined |= self._dynamic_blocked
-        radius_cells = int(math.ceil(self._inflate_r / self._map_info.resolution))
-        struct = np.zeros((2 * radius_cells + 1, 2 * radius_cells + 1), dtype=bool)
-        cy = cx = radius_cells
-        for r in range(struct.shape[0]):
-            for c in range(struct.shape[1]):
-                if math.hypot(r - cy, c - cx) <= radius_cells:
-                    struct[r, c] = True
-        self._costmap = binary_dilation(combined, structure=struct)
+        res = self._map_info.resolution
+
+        # Distance from nearest static obstacle in metres
+        dist = distance_transform_edt(~self._blocked) * res
+
+        costmap = np.zeros(self._blocked.shape, dtype=float)
+
+        # Lethal zone: within robot_radius → inf
+        costmap[dist < self._robot_r] = math.inf
+
+        # Gradient zone: exponential decay from robot_r to inflate_r
+        span = self._inflate_r - self._robot_r
+        if span > 0:
+            grad_mask = (dist >= self._robot_r) & (dist < self._inflate_r)
+            d = dist[grad_mask]
+            costmap[grad_mask] = _MAX_TERRAIN_COST * np.exp(-3.0 * (d - self._robot_r) / span)
+
+        # Dynamic obstacles: lethal within dyn_inflate_r
+        if self._dynamic_blocked is not None and self._dynamic_blocked.any():
+            dist_dyn = distance_transform_edt(~self._dynamic_blocked) * res
+            costmap[dist_dyn < self._dyn_inflate_r] = math.inf
+
+        self._costmap = costmap
 
     def _publish_costmap(self) -> None:
         if self._costmap is None or self._map_info is None:
@@ -224,8 +246,12 @@ class AStarPlanner(Node):
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'map'
         msg.info = self._map_info
-        flat = self._costmap.astype(np.int8) * 100
-        msg.data = flat.flatten().tolist()
+        # inf → 100, gradient → 1-99 proportional, free → 0
+        vis = np.where(
+            np.isinf(self._costmap), 100,
+            np.clip(self._costmap / _MAX_TERRAIN_COST * 99, 0, 99)
+        ).astype(np.int8)
+        msg.data = vis.flatten().tolist()
         self._costmap_pub.publish(msg)
 
     # ------------------------------------------------------------------
