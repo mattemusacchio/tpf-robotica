@@ -77,3 +77,49 @@ ros2 topic hz /tb4_0/oakd/rgb/preview/image_raw
 ```bash
 rqt_image_view /aruco/debug_image
 ```
+
+## Parte C: detector de conos rojos
+
+El nodo `red_cone_detector_node` implementa la misión visual de la Parte C:
+segmenta rojo en HSV, filtra distractores por geometría del contorno, exige
+varias detecciones consistentes y publica un objetivo navegable en `/goal_pose`.
+La detección visual no controla velocidades directamente; manda una pose al
+planner para que A* genere una ruta válida sobre el mapa y no intente cruzar
+paredes con huecos.
+
+Detector solo:
+
+```bash
+ros2 launch tpf_perception red_cone_detector.launch.py
+ros2 bag play data/rosbags/laberinto_conos --clock
+```
+
+Stack integrado de Parte C:
+
+```bash
+ros2 launch tpf_navigation part_c_cone_search.launch.py
+ros2 bag play data/rosbags/laberinto_conos --clock
+```
+
+Entradas principales:
+
+- `/tb4_0/oakd/rgb/preview/image_raw`
+- `/tb4_0/oakd/rgb/preview/camera_info`
+- `/pose_estimate`, publicada por `mcl_localizer`
+
+Salidas principales:
+
+- `/red_cone/detections` (`std_msgs/String`): JSON con bounding box, rango,
+  bearing, posición aproximada en `map` y flag `stable`.
+- `/red_cone/debug_image` (`sensor_msgs/Image`): imagen anotada.
+- `/red_cone/markers` (`visualization_msgs/MarkerArray`): cono y goal en RViz.
+- `/goal_pose` (`geometry_msgs/PoseStamped`): objetivo final para el planner
+  cuando la detección ya es estable.
+
+Parámetros a calibrar en laboratorio:
+
+- `cone_height_m`: altura real del cono.
+- `min_area_px`, `min_height_px` y filtros de forma si cambia la distancia.
+- rangos HSV en `red_cone_detector_node.py` si la iluminación desplaza el rojo.
+- `camera_x_offset_m`, `camera_y_offset_m` y `camera_yaw_offset_rad` si la cámara
+  no está alineada con `base_link`.
