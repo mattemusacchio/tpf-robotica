@@ -516,6 +516,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--loop-closure-min-index-gap', type=int, default=25)
     parser.add_argument('--scan-topic', default='/tb4_0/scan', help='LiDAR topic name in the bag.')
     parser.add_argument('--odom-topic', default='/tb4_0/odom', help='Odometry topic name in the bag.')
+    parser.add_argument('--image-topic', default='/tb4_0/oakd/rgb/preview/image_raw', help='Camera topic name in the bag.')
     return parser
 
 
@@ -538,6 +539,7 @@ def config_from_args(args: argparse.Namespace) -> OfflineBuilderConfig:
         loop_closure_min_index_gap=max(1, int(args.loop_closure_min_index_gap)),
         scan_topic=args.scan_topic,
         odom_topic=args.odom_topic,
+        image_topic=args.image_topic,
     )
 
 
