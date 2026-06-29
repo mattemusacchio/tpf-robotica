@@ -36,16 +36,26 @@ def generate_launch_description():
     default_map = os.path.abspath('log/maps/laberinto_map.yaml')
 
     map_yaml = LaunchConfiguration('map_yaml')
-    image_topic = LaunchConfiguration('image_topic')
-    camera_info_topic = LaunchConfiguration('camera_info_topic')
+    robot = LaunchConfiguration('robot')
     use_rviz = LaunchConfiguration('rviz')
+
+    # Cambiar de robot = cambiar `robot:=tb4_1`. Los remappings llevan TODO al
+    # namespace elegido (se aplican siempre, sin depender de la precedencia de
+    # parametros). Con robot:=tb4_0 quedan identidad (comportamiento por defecto).
+    ns = ['/', robot]
+    remap_scan_ns = ('/tb4_0/scan', ns + ['/scan'])        # mcl/astar (param /tb4_0/scan)
+    remap_scan_plain = ('/scan', ns + ['/scan'])           # navigation_sm (hardcodea /scan)
+    remap_odom = ('/tb4_0/odom', ns + ['/odom'])
+    remap_image = ('/tb4_0/oakd/rgb/preview/image_raw', ns + ['/oakd/rgb/preview/image_raw'])
+    remap_caminfo = ('/tb4_0/oakd/rgb/preview/camera_info', ns + ['/oakd/rgb/preview/camera_info'])
+    remap_cmdvel = ('/cmd_vel', ns + ['/cmd_vel'])         # salida hacia el robot real
 
     return LaunchDescription([
         # Robot real -> reloj real (NO sim time).
         DeclareLaunchArgument('map_yaml', default_value=default_map,
                               description='Mapa del laberinto (de Parte A). Cambiar si el lab usa otro.'),
-        DeclareLaunchArgument('image_topic', default_value='/tb4_0/oakd/rgb/preview/image_raw'),
-        DeclareLaunchArgument('camera_info_topic', default_value='/tb4_0/oakd/rgb/preview/camera_info'),
+        DeclareLaunchArgument('robot', default_value='tb4_0',
+                              description='Namespace del robot: tb4_0 | tb4_1 (cambia scan/odom/imagen/cmd_vel).'),
         DeclareLaunchArgument('rviz', default_value='true'),
 
         Node(
@@ -71,6 +81,7 @@ def generate_launch_description():
                 executable='mcl_localizer',
                 name='mcl_localizer',
                 parameters=[nav_params],
+                remappings=[remap_scan_ns, remap_odom],
                 output='screen',
             ),
             Node(
@@ -78,6 +89,7 @@ def generate_launch_description():
                 executable='astar_planner',
                 name='astar_planner',
                 parameters=[nav_params],
+                remappings=[remap_scan_ns],
                 output='screen',
             ),
             Node(
@@ -85,6 +97,7 @@ def generate_launch_description():
                 executable='pure_pursuit',
                 name='pure_pursuit',
                 parameters=[nav_params],
+                remappings=[remap_cmdvel],
                 output='screen',
             ),
             Node(
@@ -92,16 +105,15 @@ def generate_launch_description():
                 executable='navigation_sm',
                 name='navigation_sm',
                 parameters=[nav_params],
+                remappings=[remap_scan_plain, remap_cmdvel],
                 output='screen',
             ),
             Node(
                 package='tpf_perception',
                 executable='red_cone_detector_node',
                 name='red_cone_detector_node',
-                parameters=[cone_params,
-                            {'use_sim_time': False,
-                             'image_topic': image_topic,
-                             'camera_info_topic': camera_info_topic}],
+                parameters=[cone_params, {'use_sim_time': False}],
+                remappings=[remap_image, remap_caminfo],
                 output='screen',
             ),
         ]),

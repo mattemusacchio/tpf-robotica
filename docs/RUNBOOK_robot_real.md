@@ -68,10 +68,22 @@ Si detecta de más/menos, ajustar umbrales HSV en
 
 ### 4) Lanzar el stack de Parte C real (closed-loop)
 ```bash
-ros2 launch tpf_navigation part_c_real_robot.launch.py \
-  image_topic:=<image> camera_info_topic:=<camera_info>
+ros2 launch tpf_navigation part_c_real_robot.launch.py
 ```
-(si los tópicos son `/tb4_0/*`, andá sin argumentos).
+**Cambiar de robot (tb4_0 / tb4_1) es UN argumento:**
+```bash
+ros2 launch tpf_navigation part_c_real_robot.launch.py robot:=tb4_1
+```
+El `robot:=` lleva scan/odom/imagen/camera_info **y `cmd_vel`** al namespace elegido
+(vía remappings, no depende de la precedencia de params). Default `tb4_0`.
+
+> Si el robot **no se mueve** pero todo lo demás anda: el `cmd_vel` no le llega.
+> Verificá a qué tópico escucha:
+> ```bash
+> ros2 topic info /tb4_0/cmd_vel    # o /cmd_vel
+> ```
+> Si el robot usa `/cmd_vel` pelado (sin namespace), en el launch sacá
+> `remap_cmdvel` de `pure_pursuit` y `navigation_sm`, recompilá.
 
 ### 5) Fijar la pose inicial — IMPRESCINDIBLE
 En RViz: **"2D Pose Estimate"** → click sobre la **posición real** del robot en el
@@ -86,6 +98,26 @@ El robot pasa a buscar conos. Al detectar uno, publica un **goal** y A\* traza e
 - Autonomía y eficiencia explorando y buscando conos.
 - Robustez del filtro ante patinaje (la nube no debe divergir).
 - Precisión en la aproximación final al cono.
+
+### 7) Grabar un bag de la sesión (para el informe / re-análisis)
+**Importante: grabá apenas conectes**, así tenés el dato aunque la corrida en vivo
+falle (sirve para el análisis sim-to-real). En una terminal aparte:
+
+```bash
+# Liviano (recomendado): solo lo necesario para re-correr el SLAM/nav despues.
+# Ajustá tb4_0 -> tb4_1 si corresponde.
+ros2 bag record -o sesion_lab \
+  /tb4_0/scan /tb4_0/odom /tb4_0/tf /tb4_0/tf_static \
+  /tb4_0/oakd/rgb/preview/image_raw /tb4_0/oakd/rgb/preview/camera_info
+```
+```bash
+# Todo (mas simple pero PESADO por la camara; usar solo si hay disco de sobra):
+ros2 bag record -a -o sesion_lab_full
+```
+Cortás con Ctrl+C. Queda una carpeta `sesion_lab/` que después podés reproducir con
+`ros2 bag play sesion_lab --clock` (igual que el `laberinto_conos`).
+
+> Con `-o nombre` no pisás grabaciones previas. Hacé una por intento.
 
 ---
 
