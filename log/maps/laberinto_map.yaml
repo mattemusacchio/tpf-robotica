@@ -1,0 +1,6 @@
+image: laberinto_map.pgm
+resolution: 0.05
+origin: [-13.748633305978476, -9.09304539721079, 0.0]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.196
