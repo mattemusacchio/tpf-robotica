@@ -24,7 +24,8 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     pkg_nav = FindPackageShare('tpf_navigation')
     pkg_perception = FindPackageShare('tpf_perception')
-    nav_params = PathJoinSubstitution([pkg_nav, 'config', 'navigation_params_rosbag.yaml'])
+    nav_params_default = PathJoinSubstitution([pkg_nav, 'config', 'navigation_params_rosbag.yaml'])
+    nav_params = LaunchConfiguration('nav_params')
     cone_params = PathJoinSubstitution([pkg_perception, 'config', 'red_cone_detector.yaml'])
     rviz_config = PathJoinSubstitution([pkg_nav, 'rviz', 'part_b_navigation.rviz'])
 
@@ -51,6 +52,7 @@ def generate_launch_description():
         DeclareLaunchArgument('camera_info_topic', default_value='/tb4_0/oakd/rgb/preview/camera_info'),
         DeclareLaunchArgument('n_particles', default_value='800'),
         DeclareLaunchArgument('rviz', default_value='true'),
+        DeclareLaunchArgument('nav_params', default_value=nav_params_default),
         DeclareLaunchArgument('init_x', default_value='-0.34'),
         DeclareLaunchArgument('init_y', default_value='1.19'),
         DeclareLaunchArgument('init_std', default_value='0.30'),
