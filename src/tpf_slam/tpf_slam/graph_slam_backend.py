@@ -19,10 +19,11 @@ import numpy as np
 
 try:  # pragma: no cover - exercised in integration in this ROS image
     from scipy.optimize import least_squares
-    from scipy.sparse import lil_matrix
+    from scipy.sparse import csr_matrix, lil_matrix
 except Exception:  # pragma: no cover - fallback path for minimal environments
     least_squares = None
     lil_matrix = None
+    csr_matrix = None
 
 
 PI = 3.141592653589793
@@ -31,11 +32,7 @@ PI = 3.141592653589793
 def normalize_angle(angle: float) -> float:
     """Normalize an angle to [-pi, pi]."""
 
-    while angle > PI:
-        angle -= 2.0 * PI
-    while angle < -PI:
-        angle += 2.0 * PI
-    return angle
+    return atan2(sin(angle), cos(angle))
 
 
 @dataclass(frozen=True)
@@ -46,13 +43,26 @@ class BackendConfig:
     # a robust loss instead of being allowed to warp the trajectory.
     odom_translation_sigma: float = 0.03
     odom_rotation_sigma: float = 0.03
+    # Constant visual sigmas: only used when use_constant_visual_sigmas is True
+    # (i.e. the user explicitly overrode via --visual-range-sigma/--visual-bearing-sigma).
     visual_range_sigma: float = 0.40
     visual_bearing_sigma: float = 0.30
+    use_constant_visual_sigmas: bool = False
+    # Distance-dependent visual sigmas (default model): ArUco range/bearing noise
+    # grows with distance to the tag, so the residual weight is scaled per-edge from
+    # the measured range r: sigma_range = base + quad * r^2, sigma_bearing = base + lin * r.
+    visual_range_sigma_base: float = 0.05
+    visual_range_sigma_quad: float = 0.04
+    visual_bearing_sigma_base: float = 0.05
+    visual_bearing_sigma_lin: float = 0.03
     # LiDAR scan-matching (ICP) pose-pose constraints: reliable geometry, trusted
     # almost as much as odometry and used for loop closures.
     icp_translation_sigma: float = 0.05
     icp_rotation_sigma: float = 0.04
+    # scipy least_squares stops at max_nfev *function evaluations*, not iterations.
+    # max_iterations is kept for backward-compat and folded into max_nfev.
     max_iterations: int = 150
+    max_nfev: int = 20000
     loss: str = 'cauchy'
     f_scale: float = 1.0
 
@@ -79,8 +89,54 @@ class GraphSlamBackend:
         self.visual_edges = graph.get('visual_edges', [])
         if not self.keyframes:
             raise ValueError('Graph has no keyframes')
+        self.edge_filter_stats = self._filter_edges()
         self.layout = self._make_layout()
         self.initial_state = self._pack_initial_state()
+
+    def _filter_edges(self) -> dict[str, int]:
+        """Drop edges that reference unknown nodes or carry broken measurements.
+
+        The sparsity matrix assumes every remaining edge emits residuals, so edges
+        whose endpoints are missing from the graph must be removed before layout,
+        not silently skipped inside residuals() (which would create a row-count
+        mismatch). Visual edges with an implausible range (< 0.1 m or > 3.5 m) come
+        from broken PnP solutions and are dropped here too.
+        """
+
+        keyframe_ids = {int(keyframe['id']) for keyframe in self.keyframes}
+        landmark_ids = {int(landmark['id']) for landmark in self.landmarks}
+
+        def pose_pose_ok(edge: dict[str, Any]) -> bool:
+            return int(edge['from_id']) in keyframe_ids and int(edge['to_id']) in keyframe_ids
+
+        kept_odom = [edge for edge in self.odom_edges if pose_pose_ok(edge)]
+        kept_icp = [edge for edge in self.icp_edges if pose_pose_ok(edge)]
+
+        kept_visual: list[dict[str, Any]] = []
+        dropped_visual_missing = 0
+        dropped_visual_range = 0
+        for edge in self.visual_edges:
+            if int(edge['keyframe_id']) not in keyframe_ids or int(edge['landmark_id']) not in landmark_ids:
+                dropped_visual_missing += 1
+                continue
+            measured_range = float(edge['range'])
+            if measured_range < 0.1 or measured_range > 3.5:
+                dropped_visual_range += 1
+                continue
+            kept_visual.append(edge)
+
+        stats = {
+            'dropped_odom_edges': len(self.odom_edges) - len(kept_odom),
+            'dropped_icp_edges': len(self.icp_edges) - len(kept_icp),
+            'dropped_visual_edges_missing_node': dropped_visual_missing,
+            'dropped_visual_edges_bad_range': dropped_visual_range,
+        }
+        self.odom_edges = kept_odom
+        self.icp_edges = kept_icp
+        self.visual_edges = kept_visual
+        if any(stats.values()):
+            print('graph_slam_backend edge filter: %s' % json.dumps(stats, sort_keys=True), flush=True)
+        return stats
 
     def optimize(self) -> dict[str, Any]:
         """Run nonlinear least squares and return an optimized graph snapshot."""
@@ -97,7 +153,8 @@ class GraphSlamBackend:
             result = least_squares(
                 self.residuals,
                 self.initial_state,
-                max_nfev=self.config.max_iterations,
+                max_nfev=self.config.max_nfev,
+                x_scale='jac',
                 loss=self.config.loss,
                 f_scale=self.config.f_scale,
                 jac_sparsity=self.jacobian_sparsity(),
@@ -126,6 +183,10 @@ class GraphSlamBackend:
                 'usable_solution': bool(np.isfinite(final_cost) and final_cost < initial_cost),
                 'residual_count': int(final_residual.size),
                 'variable_count': int(self.layout.size),
+                'max_nfev': int(self.config.max_nfev),
+                'max_iterations': int(self.config.max_iterations),
+                'visual_sigma_model': 'constant' if self.config.use_constant_visual_sigmas else 'distance_dependent',
+                'edge_filter': self.edge_filter_stats,
                 'config': self.config.__dict__,
             },
             'counts': {
@@ -171,12 +232,23 @@ class GraphSlamBackend:
             dy = landmark_y - pose_y
             pred_range = hypot(dx, dy)
             pred_bearing = normalize_angle(atan2(dy, dx) - pose_theta)
+            measured_range = float(edge['range'])
+            sigma_range, sigma_bearing = self._visual_sigmas(measured_range)
             residuals.extend([
-                (pred_range - float(edge['range'])) / self.config.visual_range_sigma,
-                normalize_angle(pred_bearing - float(edge['bearing'])) / self.config.visual_bearing_sigma,
+                (pred_range - measured_range) / sigma_range,
+                normalize_angle(pred_bearing - float(edge['bearing'])) / sigma_bearing,
             ])
 
         return np.asarray(residuals, dtype=float)
+
+    def _visual_sigmas(self, measured_range: float) -> tuple[float, float]:
+        """Range/bearing sigmas for a visual edge, constant or distance-dependent."""
+
+        if self.config.use_constant_visual_sigmas:
+            return self.config.visual_range_sigma, self.config.visual_bearing_sigma
+        sigma_range = self.config.visual_range_sigma_base + self.config.visual_range_sigma_quad * measured_range * measured_range
+        sigma_bearing = self.config.visual_bearing_sigma_base + self.config.visual_bearing_sigma_lin * measured_range
+        return sigma_range, sigma_bearing
 
     def _pose_pose_residual(
         self,
@@ -411,14 +483,26 @@ def write_csvs(optimized_graph: dict[str, Any], output_dir: Path) -> None:
 
 
 def load_config(args: argparse.Namespace) -> BackendConfig:
+    # If the user explicitly passes --visual-range-sigma/--visual-bearing-sigma we
+    # honour the old constant-sigma behaviour; otherwise use the distance-dependent
+    # model. max_nfev counts function evaluations, so fold --max-iterations into it.
+    use_constant = args.visual_range_sigma is not None or args.visual_bearing_sigma is not None
+    visual_range_sigma = args.visual_range_sigma if args.visual_range_sigma is not None else 0.40
+    visual_bearing_sigma = args.visual_bearing_sigma if args.visual_bearing_sigma is not None else 0.30
     return BackendConfig(
         odom_translation_sigma=args.odom_translation_sigma,
         odom_rotation_sigma=args.odom_rotation_sigma,
-        visual_range_sigma=args.visual_range_sigma,
-        visual_bearing_sigma=args.visual_bearing_sigma,
+        visual_range_sigma=visual_range_sigma,
+        visual_bearing_sigma=visual_bearing_sigma,
+        use_constant_visual_sigmas=use_constant,
+        visual_range_sigma_base=args.visual_range_sigma_base,
+        visual_range_sigma_quad=args.visual_range_sigma_quad,
+        visual_bearing_sigma_base=args.visual_bearing_sigma_base,
+        visual_bearing_sigma_lin=args.visual_bearing_sigma_lin,
         icp_translation_sigma=args.icp_translation_sigma,
         icp_rotation_sigma=args.icp_rotation_sigma,
         max_iterations=args.max_iterations,
+        max_nfev=max(int(args.max_nfev), int(args.max_iterations)),
         loss=args.loss,
         f_scale=args.f_scale,
     )
@@ -440,11 +524,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--output', default='log/slam_optimized_graph.json', help='Output optimized graph JSON path.')
     parser.add_argument('--odom-translation-sigma', type=float, default=0.03)
     parser.add_argument('--odom-rotation-sigma', type=float, default=0.03)
-    parser.add_argument('--visual-range-sigma', type=float, default=0.40)
-    parser.add_argument('--visual-bearing-sigma', type=float, default=0.30)
+    parser.add_argument('--visual-range-sigma', type=float, default=None,
+                        help='Override with a constant range sigma (disables the distance-dependent model).')
+    parser.add_argument('--visual-bearing-sigma', type=float, default=None,
+                        help='Override with a constant bearing sigma (disables the distance-dependent model).')
+    parser.add_argument('--visual-range-sigma-base', type=float, default=0.05)
+    parser.add_argument('--visual-range-sigma-quad', type=float, default=0.04)
+    parser.add_argument('--visual-bearing-sigma-base', type=float, default=0.05)
+    parser.add_argument('--visual-bearing-sigma-lin', type=float, default=0.03)
     parser.add_argument('--icp-translation-sigma', type=float, default=0.05)
     parser.add_argument('--icp-rotation-sigma', type=float, default=0.04)
-    parser.add_argument('--max-iterations', type=int, default=150)
+    parser.add_argument('--max-iterations', type=int, default=150,
+                        help='Backward-compat; folded into --max-nfev via max(max_nfev, max_iterations).')
+    parser.add_argument('--max-nfev', type=int, default=20000,
+                        help='Max scipy least_squares function evaluations.')
     parser.add_argument('--loss', default='cauchy')
     parser.add_argument('--f-scale', type=float, default=1.0)
     return parser

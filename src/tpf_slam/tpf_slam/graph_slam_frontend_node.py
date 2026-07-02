@@ -29,11 +29,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 def normalize_angle(angle: float) -> float:
     """Normalize an angle to [-pi, pi]."""
 
-    while angle > 3.141592653589793:
-        angle -= 2.0 * 3.141592653589793
-    while angle < -3.141592653589793:
-        angle += 2.0 * 3.141592653589793
-    return angle
+    return atan2(sin(angle), cos(angle))
 
 
 def yaw_from_quaternion(x: float, y: float, z: float, w: float) -> float:

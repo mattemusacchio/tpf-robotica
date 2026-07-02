@@ -60,12 +60,21 @@ def rotation_matrix_to_quaternion(rotation_matrix: np.ndarray) -> tuple[float, f
     return (qx / norm, qy / norm, qz / norm, qw / norm)
 
 
-def optical_tvec_to_planar_observation(tvec: Iterable[float]) -> dict[str, float]:
-    """Return range/bearing and approximate base-frame coordinates for a tag tvec."""
+def optical_tvec_to_planar_observation(
+    tvec: Iterable[float],
+    camera_x_offset_m: float = 0.0,
+    camera_y_offset_m: float = 0.0,
+) -> dict[str, float]:
+    """Return range/bearing and approximate base-frame coordinates for a tag tvec.
+
+    ``camera_x_offset_m``/``camera_y_offset_m`` are the planar position of the
+    camera optical frame in the robot base frame; they shift the observation from
+    the camera origin to the base origin.
+    """
 
     optical_x, optical_y, optical_z = [float(value) for value in tvec]
-    robot_x = optical_z
-    robot_y = -optical_x
+    robot_x = optical_z + camera_x_offset_m
+    robot_y = -optical_x + camera_y_offset_m
     robot_z = -optical_y
     planar_range = sqrt(robot_x * robot_x + robot_y * robot_y)
     bearing = atan2(robot_y, robot_x)

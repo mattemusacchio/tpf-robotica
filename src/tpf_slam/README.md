@@ -76,17 +76,17 @@ Para bags grandes como `laberinto`, reproducir en tiempo real puede ser lento. E
 ros2 run tpf_slam offline_rosbag_graph_builder \
   --bag data/rosbags/laberinto \
   --output log/laberinto_frontend_graph.json \
-  --image-stride 50 \
+  --image-stride 10 \
   --progress-interval 200
 ```
 
-Luego optimizar:
+Luego optimizar (`--max-nfev` cuenta evaluaciones de funcion, no iteraciones):
 
 ```bash
 ros2 run tpf_slam graph_slam_backend \
   --input log/laberinto_frontend_graph.json \
   --output log/laberinto_optimized_graph.json \
-  --max-iterations 200
+  --max-nfev 20000
 ```
 
 Validación actual con el bag completo `laberinto` usando `--image-stride 50`:
@@ -110,10 +110,16 @@ ros2 run tpf_slam occupancy_grid_builder \
   --map-name laberinto_map \
   --resolution 0.05 \
   --max-range-m 5.0 \
+  --scan-stride 2 \
   --beam-stride 1 \
-  --inflate-radius-m 0.06 \
+  --inflate-radius-m 0.0 \
+  --min-occupied-component-cells 3 \
   --no-tf-static --laser-x-m -0.04 --laser-yaw-rad 1.5707963267948966
 ```
+
+> La inflacion no se hornea en el mapa exportado (`--inflate-radius-m 0.0`): eso
+> corresponde al costmap de Nav2. Para una referencia extra-nitida usar
+> `--resolution 0.03 --scan-stride 1`.
 
 > Importante: el láser de este bag está montado a `yaw = pi/2`. Si se usa
 > `--no-tf-static`, hay que pasar `--laser-yaw-rad 1.5707963267948966` (y
@@ -255,27 +261,32 @@ El reporte incluye cantidad de keyframes, landmarks, aristas odometricas, arista
 ros2 run tpf_slam offline_rosbag_graph_builder \
   --bag data/rosbags/laberinto \
   --output log/laberinto_frontend_graph.json \
-  --image-stride 50 \
+  --image-stride 10 \
   --progress-interval 200
 
 # 2) Optimizar trayectoria y landmarks con Graph SLAM.
+#    --max-nfev cuenta evaluaciones de funcion (no iteraciones); 20000 evita que
+#    el solver termine antes de converger.
 ros2 run tpf_slam graph_slam_backend \
   --input log/laberinto_frontend_graph.json \
   --output log/laberinto_optimized_graph.json \
-  --max-iterations 200
+  --max-nfev 20000
 
 # 3) Proyectar LIDAR usando la trayectoria corregida.
+#    La inflacion NO se hornea en el mapa exportado (--inflate-radius-m 0.0): eso
+#    corresponde al costmap de Nav2. Para una referencia extra-nitida usar
+#    --resolution 0.03 --scan-stride 1.
 ros2 run tpf_slam occupancy_grid_builder \
   --bag data/rosbags/laberinto \
   --optimized-graph log/laberinto_optimized_graph.json \
   --output-dir log/maps \
   --map-name laberinto_map \
-  --resolution 0.08 \
+  --resolution 0.05 \
   --max-range-m 5.0 \
-  --scan-stride 10 \
-  --beam-stride 5 \
-  --inflate-radius-m 0.08 \
-  --min-occupied-component-cells 4
+  --scan-stride 2 \
+  --beam-stride 1 \
+  --inflate-radius-m 0.0 \
+  --min-occupied-component-cells 3
 
 # 4) Emitir reporte de defensa.
 ros2 run tpf_slam slam_quality_report \
@@ -284,3 +295,20 @@ ros2 run tpf_slam slam_quality_report \
   --map-summary log/maps/laberinto_map_summary.json \
   --output log/part_a/part_a_summary.json
 ```
+
+### Calidad del mapa
+
+Ajustes aplicados para mejorar la calidad de la Parte A:
+
+- **Convergencia del solver:** el back-end usa `--max-nfev 20000` (evaluaciones de
+  funcion, no iteraciones) y `x_scale='jac'`, de modo que el least_squares deja de
+  quedarse corto y realmente reduce el costo.
+- **Offset de camara:** las observaciones ArUco se corrigen por la posicion del
+  frame optico respecto de `base_link`, resuelta desde `tf_static` del bag (o el
+  valor de config si no esta disponible).
+- **Filtrado de outliers:** se descartan mediciones ArUco detras de camara, fuera
+  de rango, con error de reproyeccion alto, con angulo rasante excesivo, y frames
+  con motion blur; el back-end tambien descarta aristas visuales con rango
+  imposible (`< 0.1 m` o `> 3.5 m`).
+- **Sin inflacion horneada:** el mapa exportado no infla las paredes
+  (`--inflate-radius-m 0.0`); la inflacion corresponde al costmap de Nav2.

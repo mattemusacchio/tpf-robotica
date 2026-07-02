@@ -186,7 +186,7 @@ class OccupancyGridBuilder:
                 f'origin: [{self.origin_x}, {self.origin_y}, 0.0]',
                 'negate: 0',
                 'occupied_thresh: 0.65',
-                'free_thresh: 0.196',
+                'free_thresh: 0.19',
                 '',
             ]),
             encoding='utf-8',
