@@ -65,6 +65,12 @@ class NavigationSM(Node):
         self.declare_parameter('localized_cov_thresh', _COV_DIAG_THRESH)
         self.declare_parameter('localizing_timeout_s', _LOCALIZING_TIMEOUT_S)
         self.declare_parameter('planning_timeout_s', _PLANNING_TIMEOUT_S)
+        # Montaje del LiDAR: debe coincidir con mcl_localizer/astar_planner. En el
+        # robot real el LiDAR va rotado (laser_yaw_rad=pi/2, laser_x_m=-0.04); en
+        # Gazebo x=-0.032, yaw=0. Antes estaba hardcodeado -> proyeccion de haces
+        # rota en el robot real (deteccion de obstaculos geometricamente mal).
+        self.declare_parameter('laser_x_m', -0.032)
+        self.declare_parameter('laser_yaw_rad', 0.0)
 
         self._obs_stop_range = float(self.get_parameter('obstacle_stop_range_m').value)
         self._obs_detect_range = float(self.get_parameter('obstacle_range_m').value)
@@ -73,6 +79,8 @@ class NavigationSM(Node):
         self._cov_thresh = float(self.get_parameter('localized_cov_thresh').value)
         self._localizing_timeout = float(self.get_parameter('localizing_timeout_s').value)
         self._planning_timeout = float(self.get_parameter('planning_timeout_s').value)
+        self._laser_x = float(self.get_parameter('laser_x_m').value)
+        self._laser_yaw = float(self.get_parameter('laser_yaw_rad').value)
 
         self._state = State.IDLE
         self._state_entry_time: float = self.get_clock().now().nanoseconds * 1e-9
@@ -181,9 +189,10 @@ class NavigationSM(Node):
         map_data = self._map.data
 
         rx, ry, ryaw = self._robot_x, self._robot_y, self._robot_yaw
-        # Laser mount — TurtleBot3 burger in Gazebo: x=-0.032m, no yaw offset
-        _LASER_X = -0.032
-        _LASER_YAW = 0.0
+        # Laser mount parametrizado (laser_x_m/laser_yaw_rad) para coincidir con el
+        # robot real (yaw=pi/2, x=-0.04) o Gazebo (x=-0.032, yaw=0).
+        _LASER_X = self._laser_x
+        _LASER_YAW = self._laser_yaw
         sx = rx + _LASER_X * math.cos(ryaw)
         sy = ry + _LASER_X * math.sin(ryaw)
 

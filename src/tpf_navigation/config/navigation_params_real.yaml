@@ -75,3 +75,7 @@ navigation_sm:
     localizing_timeout_s: 60.0
     planning_timeout_s: 5.0
     localized_cov_thresh: 1.0
+    # Montaje del LiDAR (debe coincidir con mcl_localizer/astar_planner) para que
+    # la deteccion de obstaculos proyecte los haces correctamente en el robot real.
+    laser_x_m: -0.04
+    laser_yaw_rad: 1.5707963267948966
