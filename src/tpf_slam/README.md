@@ -272,23 +272,38 @@ ros2 run tpf_slam graph_slam_backend \
   --output log/laberinto_optimized_graph.json \
   --max-nfev 20000
 
-# 3) Proyectar LIDAR usando la trayectoria corregida.
+# 3) Segunda pasada de ICP: re-matchear scans con las poses ya optimizadas
+#    (agrega mas loop closures sobre la trayectoria corregida) y reoptimizar.
+ros2 run tpf_slam second_pass_icp \
+  --frontend-graph log/laberinto_frontend_graph.json \
+  --optimized-graph log/laberinto_optimized_graph.json \
+  --bag data/rosbags/laberinto \
+  --output log/laberinto_second_pass_graph.json
+
+ros2 run tpf_slam graph_slam_backend \
+  --input log/laberinto_second_pass_graph.json \
+  --output log/laberinto_optimized_graph_final.json \
+  --max-nfev 20000
+
+# 4) Proyectar LIDAR usando la trayectoria corregida.
 #    La inflacion NO se hornea en el mapa exportado (--inflate-radius-m 0.0): eso
-#    corresponde al costmap de Nav2. Para una referencia extra-nitida usar
-#    --resolution 0.03 --scan-stride 1.
+#    corresponde al costmap de Nav2.
 ros2 run tpf_slam occupancy_grid_builder \
   --bag data/rosbags/laberinto \
-  --optimized-graph log/laberinto_optimized_graph.json \
+  --optimized-graph log/laberinto_optimized_graph_final.json \
   --output-dir log/maps \
   --map-name laberinto_map \
-  --resolution 0.05 \
+  --resolution 0.03 \
   --max-range-m 5.0 \
-  --scan-stride 2 \
+  --scan-stride 1 \
   --beam-stride 1 \
   --inflate-radius-m 0.0 \
-  --min-occupied-component-cells 3
+  --min-occupied-component-cells 4 \
+  --min-hits-for-occupied 4
 
-# 4) Emitir reporte de defensa.
+# (variante rapida para iterar: --resolution 0.05 --scan-stride 2 --min-occupied-component-cells 3)
+
+# 5) Emitir reporte de defensa.
 ros2 run tpf_slam slam_quality_report \
   --frontend-graph log/laberinto_frontend_graph.json \
   --optimized-graph log/laberinto_optimized_graph.json \
@@ -312,3 +327,10 @@ Ajustes aplicados para mejorar la calidad de la Parte A:
   imposible (`< 0.1 m` o `> 3.5 m`).
 - **Sin inflacion horneada:** el mapa exportado no infla las paredes
   (`--inflate-radius-m 0.0`); la inflacion corresponde al costmap de Nav2.
+- **Jacobiano analitico:** el back-end evalua residuales vectorizados y un
+  jacobiano analitico disperso (validado contra diferencias finitas a 1e-5), lo
+  que baja cada evaluacion de ~100 ms a <1 ms y permite optimizar el grafo
+  completo (973 keyframes) en ~2 minutos. `--numeric-jac` conserva el camino
+  viejo por diferencias finitas para debugging.
+- **Alineacion scan<->keyframe:** cada keyframe usa el scan mas cercano en tiempo
+  al stamp de odometria, con la pose interpolada al stamp del scan.

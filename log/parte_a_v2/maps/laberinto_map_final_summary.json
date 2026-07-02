@@ -1,0 +1,28 @@
+{
+  "bag": "data/rosbags/laberinto",
+  "height": 586,
+  "landmarks": 46,
+  "laser_transform": {
+    "base_frame": "base_link",
+    "source": "tf_static:base_link->rplidar_link",
+    "x": -0.04,
+    "y": 0.0,
+    "yaw": 1.5707963267948963
+  },
+  "optimized_graph": "log/parte_a_v2/optimized_graph_v4.json",
+  "origin": {
+    "theta": 0.0,
+    "x": -12.878860558771024,
+    "y": -8.050764114738687
+  },
+  "resolution": 0.03,
+  "stats": {
+    "free_updates": 36847268,
+    "occupied_updates": 1175836,
+    "processed_scans": 1853,
+    "scan_messages": 10797,
+    "valid_rays": 1176236
+  },
+  "trajectory_keyframes": 973,
+  "width": 629
+}
