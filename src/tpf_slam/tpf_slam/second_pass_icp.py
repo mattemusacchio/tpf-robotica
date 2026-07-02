@@ -21,12 +21,6 @@ from rosidl_runtime_py.utilities import get_message
 
 from .icp import icp_match, scan_to_points
 
-SCAN_TOPIC = '/tb4_0/scan'
-LASER_X = -0.04
-LASER_Y = 0.0
-LASER_YAW = 1.5707963267948966
-ICP_MAX_RANGE = 5.0
-
 
 def _normalize(a: float) -> float:
     return atan2(sin(a), cos(a))
@@ -42,7 +36,16 @@ def _relative_pose(opt_poses: dict, from_id: int, to_id: int) -> tuple[float, fl
     return dx, dy, _normalize(b['theta'] - a['theta'])
 
 
-def _read_scans_for_keyframes(bag_path: Path, keyframe_stamps: dict[int, float]) -> dict[int, np.ndarray]:
+def _read_scans_for_keyframes(
+    bag_path: Path,
+    keyframe_stamps: dict[int, float],
+    *,
+    scan_topic: str,
+    laser_x: float,
+    laser_y: float,
+    laser_yaw: float,
+    icp_max_range_m: float,
+) -> dict[int, np.ndarray]:
     """Deserialize only the scan closest in time to each keyframe — 737 reads, not 10797."""
     db3_files = sorted(bag_path.glob('*.db3'))
     scan_type = get_message('sensor_msgs/msg/LaserScan')
@@ -56,9 +59,9 @@ def _read_scans_for_keyframes(bag_path: Path, keyframe_stamps: dict[int, float])
         topics = {name: tid for tid, name, *_ in conn.execute(
             'SELECT id, name, type, serialization_format, offered_qos_profiles FROM topics'
         )}
-        if SCAN_TOPIC not in topics:
+        if scan_topic not in topics:
             continue
-        tid = topics[SCAN_TOPIC]
+        tid = topics[scan_topic]
         for ts, rowid in conn.execute(
             'SELECT timestamp, id FROM messages WHERE topic_id=? ORDER BY timestamp', (tid,)
         ):
@@ -104,10 +107,10 @@ def _read_scans_for_keyframes(bag_path: Path, keyframe_stamps: dict[int, float])
                 float(msg.angle_increment),
                 float(msg.range_min),
                 float(msg.range_max),
-                ICP_MAX_RANGE,
-                laser_x=LASER_X,
-                laser_y=LASER_Y,
-                laser_yaw=LASER_YAW,
+                icp_max_range_m,
+                laser_x=laser_x,
+                laser_y=laser_y,
+                laser_yaw=laser_yaw,
                 beam_stride=1,
             )
             if pts.shape[0] >= 25:
@@ -219,6 +222,11 @@ def main() -> None:
                         help='ICP mean error acceptance threshold (default 0.08)')
     parser.add_argument('--max-disagreement', type=float, default=0.8,
                         help='Max ICP vs optimized-pose disagreement in m+rad (default 0.8)')
+    parser.add_argument('--scan-topic', default='/tb4_0/scan', help='LiDAR topic name in the bag.')
+    parser.add_argument('--laser-x-m', type=float, default=-0.04, help='Laser x offset in base frame.')
+    parser.add_argument('--laser-y-m', type=float, default=0.0, help='Laser y offset in base frame.')
+    parser.add_argument('--laser-yaw-rad', type=float, default=1.5707963267948966, help='Laser yaw offset in base frame.')
+    parser.add_argument('--icp-max-range-m', type=float, default=3.5, help='Max LiDAR range used for ICP point clouds.')
     args = parser.parse_args()
 
     bag_path = Path(args.bag)
@@ -234,7 +242,14 @@ def main() -> None:
     keyframe_stamps = {kf['id']: kf['stamp'] for kf in frontend_graph['keyframes']}
 
     print(f'Reading scans for {len(keyframe_stamps)} keyframes from bag ...')
-    keyframe_scans = _read_scans_for_keyframes(bag_path, keyframe_stamps)
+    keyframe_scans = _read_scans_for_keyframes(
+        bag_path, keyframe_stamps,
+        scan_topic=args.scan_topic,
+        laser_x=args.laser_x_m,
+        laser_y=args.laser_y_m,
+        laser_yaw=args.laser_yaw_rad,
+        icp_max_range_m=args.icp_max_range_m,
+    )
     print(f'  Matched scans for {len(keyframe_scans)}/{len(keyframe_stamps)} keyframes')
 
     print('Running second-pass ICP ...')

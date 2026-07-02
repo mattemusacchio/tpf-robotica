@@ -762,11 +762,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--scan-topic', default='/tb4_0/scan', help='LiDAR topic name in the bag.')
     parser.add_argument('--odom-topic', default='/tb4_0/odom', help='Odometry topic name in the bag.')
     parser.add_argument('--image-topic', default='/tb4_0/oakd/rgb/preview/image_raw', help='Camera image topic name in the bag.')
+    parser.add_argument('--tf-static-topic', default='/tb4_0/tf_static', help='tf_static topic name in the bag.')
+    parser.add_argument('--base-frame', default='base_link', help='Robot base frame for the resolved camera offset.')
+    parser.add_argument('--camera-matrix', type=float, nargs=9, default=None, metavar='V',
+                        help='Row-major 3x3 camera intrinsics (fx 0 cx 0 fy cy 0 0 1). Defaults to the TurtleBot4 #0 calibration.')
+    parser.add_argument('--dist-coeffs', type=float, nargs=5, default=None, metavar='V',
+                        help='Distortion coefficients k1 k2 p1 p2 k3. Defaults to the TurtleBot4 #0 calibration.')
     return parser
 
 
 def config_from_args(args: argparse.Namespace) -> OfflineBuilderConfig:
+    defaults = OfflineBuilderConfig()
+    camera_matrix = tuple(args.camera_matrix) if args.camera_matrix is not None else defaults.camera_matrix
+    dist_coeffs = tuple(args.dist_coeffs) if args.dist_coeffs is not None else defaults.dist_coeffs
     return OfflineBuilderConfig(
+        camera_matrix=camera_matrix,
+        dist_coeffs=dist_coeffs,
+        tf_static_topic=args.tf_static_topic,
+        base_frame=args.base_frame,
         image_stride=max(1, int(args.image_stride)),
         max_images=max(0, int(args.max_images)),
         progress_interval=max(0, int(args.progress_interval)),
