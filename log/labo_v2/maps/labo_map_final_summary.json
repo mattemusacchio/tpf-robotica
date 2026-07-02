@@ -1,0 +1,28 @@
+{
+  "bag": "data/labo",
+  "height": 570,
+  "landmarks": 33,
+  "laser_transform": {
+    "base_frame": "base_link",
+    "source": "tf_static:base_link->rplidar_link",
+    "x": -0.04,
+    "y": 0.0,
+    "yaw": 1.5707963267948963
+  },
+  "optimized_graph": "log/labo_v2/optimized_graph_v2.json",
+  "origin": {
+    "theta": 0.0,
+    "x": -4.906288211897419,
+    "y": -8.785567892553248
+  },
+  "resolution": 0.03,
+  "stats": {
+    "free_updates": 26600060,
+    "occupied_updates": 960630,
+    "processed_scans": 1685,
+    "scan_messages": 4615,
+    "valid_rays": 965624
+  },
+  "trajectory_keyframes": 851,
+  "width": 647
+}

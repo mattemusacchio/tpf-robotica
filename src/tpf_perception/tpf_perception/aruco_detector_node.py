@@ -76,8 +76,12 @@ class ArucoDetectorNode(Node):
         self.declare_parameter('adaptive_thresh_win_size_max', 23)
         self.declare_parameter('adaptive_thresh_win_size_step', 10)
         self.declare_parameter('corner_refinement', True)
+        self.declare_parameter('camera_x_offset_m', 0.06)
+        self.declare_parameter('camera_y_offset_m', 0.0)
 
         self.marker_size_m = float(self.get_parameter('marker_size_m').value)
+        self.camera_x_offset_m = float(self.get_parameter('camera_x_offset_m').value)
+        self.camera_y_offset_m = float(self.get_parameter('camera_y_offset_m').value)
         self.publish_debug_image = bool(self.get_parameter('publish_debug_image').value)
         self.draw_axes = bool(self.get_parameter('draw_axes').value)
         self.axis_length_m = float(self.get_parameter('axis_length_m').value)
@@ -234,7 +238,11 @@ class ArucoDetectorNode(Node):
                 tvec = np.asarray(tvecs[index][0], dtype=float)
                 rotation_matrix, _ = cv2.Rodrigues(rvec)
                 quaternion = rotation_matrix_to_quaternion(rotation_matrix)
-                planar = optical_tvec_to_planar_observation(tvec)
+                planar = optical_tvec_to_planar_observation(
+                    tvec,
+                    camera_x_offset_m=self.camera_x_offset_m,
+                    camera_y_offset_m=self.camera_y_offset_m,
+                )
 
                 pose = Pose()
                 pose.position.x = float(tvec[0])

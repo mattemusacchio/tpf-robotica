@@ -17,13 +17,15 @@ from launch.actions import DeclareLaunchArgument, TimerAction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
     pkg_nav = FindPackageShare('tpf_navigation')
     pkg_perception = FindPackageShare('tpf_perception')
-    nav_params = PathJoinSubstitution([pkg_nav, 'config', 'navigation_params_rosbag.yaml'])
+    nav_params_default = PathJoinSubstitution([pkg_nav, 'config', 'navigation_params_rosbag.yaml'])
+    nav_params = LaunchConfiguration('nav_params')
     cone_params = PathJoinSubstitution([pkg_perception, 'config', 'red_cone_detector.yaml'])
     rviz_config = PathJoinSubstitution([pkg_nav, 'rviz', 'part_b_navigation.rviz'])
 
@@ -37,6 +39,9 @@ def generate_launch_description():
     camera_info_topic = LaunchConfiguration('camera_info_topic')
     n_particles = LaunchConfiguration('n_particles')
     use_rviz = LaunchConfiguration('rviz')
+    init_x = LaunchConfiguration('init_x')
+    init_y = LaunchConfiguration('init_y')
+    init_std = LaunchConfiguration('init_std')
 
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='true'),
@@ -47,12 +52,16 @@ def generate_launch_description():
         DeclareLaunchArgument('camera_info_topic', default_value='/tb4_0/oakd/rgb/preview/camera_info'),
         DeclareLaunchArgument('n_particles', default_value='800'),
         DeclareLaunchArgument('rviz', default_value='true'),
+        DeclareLaunchArgument('nav_params', default_value=nav_params_default),
+        DeclareLaunchArgument('init_x', default_value='-0.34'),
+        DeclareLaunchArgument('init_y', default_value='1.19'),
+        DeclareLaunchArgument('init_std', default_value='0.30'),
 
         Node(
             package='nav2_map_server',
             executable='map_server',
             name='map_server',
-            parameters=[{'use_sim_time': use_sim_time,
+            parameters=[{'use_sim_time': False,
                          'yaml_filename': map_yaml}],
             output='screen',
         ),
@@ -60,7 +69,7 @@ def generate_launch_description():
             package='nav2_lifecycle_manager',
             executable='lifecycle_manager',
             name='lifecycle_manager_map',
-            parameters=[{'use_sim_time': use_sim_time,
+            parameters=[{'use_sim_time': False,
                          'autostart': True,
                          'node_names': ['map_server']}],
             output='screen',
@@ -73,10 +82,10 @@ def generate_launch_description():
                 name='mcl_localizer',
                 parameters=[nav_params,
                             {'use_sim_time': use_sim_time,
-                             'num_particles': n_particles,
-                             'init_x_m': -0.34,
-                             'init_y_m': 1.19,
-                             'init_pos_std_m': 0.30,
+                             'num_particles': ParameterValue(n_particles, value_type=int),
+                             'init_x_m': ParameterValue(init_x, value_type=float),
+                             'init_y_m': ParameterValue(init_y, value_type=float),
+                             'init_pos_std_m': ParameterValue(init_std, value_type=float),
                              'odom_topic': odom_topic,
                              'scan_topic': scan_topic}],
                 output='screen',

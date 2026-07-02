@@ -186,7 +186,7 @@ class OccupancyGridBuilder:
                 f'origin: [{self.origin_x}, {self.origin_y}, 0.0]',
                 'negate: 0',
                 'occupied_thresh: 0.65',
-                'free_thresh: 0.196',
+                'free_thresh: 0.19',
                 '',
             ]),
             encoding='utf-8',
@@ -580,6 +580,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--laser-y-m', type=float, default=0.0)
     parser.add_argument('--laser-yaw-rad', type=float, default=1.5707963267948966)
     parser.add_argument('--scan-topic', type=str, default='/tb4_0/scan', help='LaserScan topic name in the bag.')
+    parser.add_argument('--tf-static-topic', type=str, default='/tb4_0/tf_static', help='tf_static topic name in the bag.')
+    parser.add_argument('--base-frame', type=str, default='base_link', help='Robot base frame to resolve the laser transform from.')
     return parser
 
 
@@ -601,6 +603,8 @@ def config_from_args(args: argparse.Namespace) -> MappingConfig:
         laser_y_m=args.laser_y_m,
         laser_yaw_rad=args.laser_yaw_rad,
         scan_topic=args.scan_topic,
+        tf_static_topic=args.tf_static_topic,
+        base_frame=args.base_frame,
     )
 
 
