@@ -14,6 +14,12 @@ __pycache__/
 .claude/
 .omc/
 
+# macOS junk
+.DS_Store
+
+# Large local lab datasets (rosbags, calibración) — 13GB, no versionar
+data_labs/
+
 # Generated frame exports
 *.gv
 frames_*.pdf
