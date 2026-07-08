@@ -76,6 +76,8 @@ navigation_sm:
     planning_timeout_s: 5.0
     localized_cov_thresh: 1.0
     scan_topic: /tb4_0/scan             # remapeado por robot:=tb4_1 si corresponde
+    # Montaje del LiDAR (debe coincidir con mcl_localizer/astar_planner) para que
+    # la deteccion de obstaculos proyecte los haces correctamente en el robot real.
     laser_x_m: -0.04
     laser_y_m: 0.0
     laser_yaw_rad: 1.5707963267948966

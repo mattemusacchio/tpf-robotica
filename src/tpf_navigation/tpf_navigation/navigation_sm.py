@@ -65,6 +65,10 @@ class NavigationSM(Node):
         self.declare_parameter('localized_cov_thresh', _COV_DIAG_THRESH)
         self.declare_parameter('localizing_timeout_s', _LOCALIZING_TIMEOUT_S)
         self.declare_parameter('planning_timeout_s', _PLANNING_TIMEOUT_S)
+        # Montaje del LiDAR: debe coincidir con mcl_localizer/astar_planner. En el
+        # robot real el LiDAR va rotado (laser_yaw_rad=pi/2, laser_x_m=-0.04); en
+        # Gazebo x=-0.032, yaw=0. Antes estaba hardcodeado -> proyeccion de haces
+        # rota en el robot real (deteccion de obstaculos geometricamente mal).
         self.declare_parameter('scan_topic', '/scan')
         self.declare_parameter('laser_x_m', -0.032)
         self.declare_parameter('laser_y_m', 0.0)
