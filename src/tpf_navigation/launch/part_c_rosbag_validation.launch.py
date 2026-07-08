@@ -8,6 +8,10 @@ closed-loop navigation would look misleading in RViz.
 Usage:
     ros2 launch tpf_navigation part_c_rosbag_validation.launch.py
     ros2 bag play data/rosbags/laberinto_conos --clock
+
+For the lab bag/map use:
+    ros2 launch tpf_navigation part_c_labo_validation.launch.py
+    ros2 bag play data/labo --clock
 """
 
 import os
@@ -56,6 +60,8 @@ def generate_launch_description():
         DeclareLaunchArgument('init_x', default_value='-0.34'),
         DeclareLaunchArgument('init_y', default_value='1.19'),
         DeclareLaunchArgument('init_std', default_value='0.30'),
+        DeclareLaunchArgument('use_static_calibration', default_value='false',
+                              description='false uses CameraInfo from the selected robot/bag.'),
 
         Node(
             package='nav2_map_server',
@@ -106,7 +112,10 @@ def generate_launch_description():
                 parameters=[cone_params,
                             {'use_sim_time': use_sim_time,
                              'image_topic': image_topic,
-                             'camera_info_topic': camera_info_topic}],
+                             'camera_info_topic': camera_info_topic,
+                             'use_static_calibration': ParameterValue(
+                                 LaunchConfiguration('use_static_calibration'),
+                                 value_type=bool)}],
                 output='screen',
             ),
         ]),

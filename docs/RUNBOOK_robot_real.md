@@ -23,11 +23,12 @@ Confirmá que el flujo anda con el bag (ensayo general):
 ```bash
 cd /home/catalina/ws/src/TP_FINAL
 # Terminal 1:
-ros2 launch tpf_navigation part_c_rosbag_validation.launch.py
+ros2 launch tpf_navigation part_c_labo_validation.launch.py
 # Terminal 2:
-ros2 bag play data/rosbags/laberinto_conos --clock
+ros2 bag play data/labo --clock
 ```
-Si en RViz ves el robot localizado + el camino verde a los conos, estás listo.
+Si en RViz ves el robot localizado sobre `labo_map_v2` + el detector publicando
+marcadores/goal cuando aparece un cono rojo, estás listo.
 
 ---
 
@@ -63,19 +64,19 @@ Si detecta de más/menos, ajustar umbrales HSV en
 `src/tpf_perception/config/red_cone_detector.yaml`.
 
 ### 3) Mapa
-- **Si el laberinto del lab es el mismo del bag** → usás `log/maps/laberinto_map.yaml` (default). ✅
-- **Si es distinto** → hay que mapear primero con Parte A en vivo y exportar un mapa nuevo, y pasarlo con `map_yaml:=/ruta/nuevo_map.yaml`.
+- Para la sesión del laboratorio ya mapeada, usá `log/maps/labo_map_v2.yaml` (default del launch real). ✅
+- Si el lab físico cambió, hay que mapear primero con Parte A en vivo y exportar un mapa nuevo, y pasarlo con `map_yaml:=/ruta/nuevo_map.yaml`.
 
 ### 4) Lanzar el stack de Parte C real (closed-loop)
 ```bash
-ros2 launch tpf_navigation part_c_real_robot.launch.py
+ros2 launch tpf_navigation part_c_real_robot.launch.py robot:=tb4_1 map_yaml:=log/maps/labo_map_v2.yaml
 ```
 **Cambiar de robot (tb4_0 / tb4_1) es UN argumento:**
 ```bash
-ros2 launch tpf_navigation part_c_real_robot.launch.py robot:=tb4_1
+ros2 launch tpf_navigation part_c_real_robot.launch.py robot:=tb4_0 map_yaml:=log/maps/labo_map_v2.yaml
 ```
 El `robot:=` lleva scan/odom/imagen/camera_info **y `cmd_vel`** al namespace elegido
-(vía remappings, no depende de la precedencia de params). Default `tb4_0`.
+(vía remappings, no depende de la precedencia de params). Default `tb4_1`.
 
 > Si el robot **no se mueve** pero todo lo demás anda: el `cmd_vel` no le llega.
 > Verificá a qué tópico escucha:
@@ -115,7 +116,7 @@ ros2 bag record -o sesion_lab \
 ros2 bag record -a -o sesion_lab_full
 ```
 Cortás con Ctrl+C. Queda una carpeta `sesion_lab/` que después podés reproducir con
-`ros2 bag play sesion_lab --clock` (igual que el `laberinto_conos`).
+`ros2 bag play sesion_lab --clock` (igual que `data/labo`).
 
 > Con `-o nombre` no pisás grabaciones previas. Hacé una por intento.
 

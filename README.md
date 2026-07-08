@@ -94,7 +94,7 @@ En RViz: **2D Pose Estimate** → **2D Goal Pose**.
 ### En el robot real
 Se usa el mismo stack de Parte C (MCL + A* + Pure Pursuit); mandás el goal a mano:
 ```bash
-ros2 launch tpf_navigation part_c_real_robot.launch.py robot:=tb4_1 map_yaml:=log/maps/vivo_map.yaml
+ros2 launch tpf_navigation part_c_real_robot.launch.py robot:=tb4_1 map_yaml:=log/maps/labo_map_v2.yaml
 # RViz: 2D Pose Estimate, luego 2D Goal Pose
 ```
 
@@ -104,15 +104,22 @@ ros2 launch tpf_navigation part_c_real_robot.launch.py robot:=tb4_1 map_yaml:=lo
 
 ### Validación con RosBag (open-loop)
 ```bash
-# T1
+# T1 — bag/map del laberinto original
 ros2 launch tpf_navigation part_c_rosbag_validation.launch.py
 # T2
 ros2 bag play data/rosbags/laberinto_conos --clock
 ```
+Para ensayar con el **mapa del laboratorio ya armado** (`log/maps/labo_map_v2.yaml`) y el bag `data/labo`:
+```bash
+# T1
+ros2 launch tpf_navigation part_c_labo_validation.launch.py rviz:=true
+# T2
+ros2 bag play data/labo --clock
+```
 
 ### Robot real (closed-loop)
 ```bash
-ros2 launch tpf_navigation part_c_real_robot.launch.py robot:=tb4_1 map_yaml:=log/maps/vivo_map.yaml
+ros2 launch tpf_navigation part_c_real_robot.launch.py robot:=tb4_1 map_yaml:=log/maps/labo_map_v2.yaml
 ```
 - **Cambiar de robot** = un argumento: `robot:=tb4_0` o `robot:=tb4_1` (remapea scan/odom/imagen/cmd_vel).
 - RViz: **2D Pose Estimate** sobre la pose real → el robot busca conos y navega hacia ellos por el mapa.

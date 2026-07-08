@@ -71,3 +71,7 @@ navigation_sm:
     localizing_timeout_s: 60.0
     planning_timeout_s: 5.0
     localized_cov_thresh: 1.0
+    scan_topic: /scan
+    laser_x_m: -0.032
+    laser_y_m: 0.0
+    laser_yaw_rad: 0.0

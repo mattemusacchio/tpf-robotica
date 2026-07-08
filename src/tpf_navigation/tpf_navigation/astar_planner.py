@@ -19,14 +19,14 @@ from typing import Any
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
+from geometry_msgs.msg import Point, PoseStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import OccupancyGrid, Path
 from rclpy.node import Node
 from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
                         ReliabilityPolicy)
 from scipy.ndimage import distance_transform_edt
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import String
+from std_msgs.msg import ColorRGBA, String
 from visualization_msgs.msg import Marker
 
 
@@ -34,6 +34,12 @@ _SQRT2 = math.sqrt(2.0)
 _MAX_TERRAIN_COST = 5.0  # max A* step penalty at lethal boundary
 
 _MAP_QOS = QoSProfile(
+    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    reliability=ReliabilityPolicy.RELIABLE,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=1,
+)
+_VIS_QOS = QoSProfile(
     durability=DurabilityPolicy.TRANSIENT_LOCAL,
     reliability=ReliabilityPolicy.RELIABLE,
     history=HistoryPolicy.KEEP_LAST,
@@ -202,6 +208,10 @@ class AStarPlanner(Node):
             str(self.get_parameter('nav_status_topic').value), 10)
         self._goal_marker_pub = self.create_publisher(
             Marker, '/goal_marker', 10)
+        self._inflation_marker_pub = self.create_publisher(
+            Marker, '/inflation_gradient', _VIS_QOS)
+        self._map_obstacles_pub = self.create_publisher(
+            Marker, '/map_obstacles', _VIS_QOS)
 
         self.create_subscription(
             OccupancyGrid,
@@ -222,6 +232,7 @@ class AStarPlanner(Node):
 
         dyn_period = 1.0 / max(0.1, float(self.get_parameter('dyn_replan_hz').value))
         self.create_timer(dyn_period, self._dyn_replan_cb)
+        self.create_timer(1.0, self._publish_inflation_marker)
 
         self.get_logger().info('A* planner ready')
 
@@ -236,6 +247,48 @@ class AStarPlanner(Node):
         self._blocked = (grid >= 50)
         self._build_costmap()
         self._publish_costmap()
+        self._publish_map_obstacles_marker()
+
+    def _publish_map_obstacles_marker(self) -> None:
+        """Publish the raw occupied map cells as a robust RViz marker.
+
+        RViz's OccupancyGrid display can render poorly on some WSL/OpenGL
+        combinations.  This marker is intentionally just the real occupied
+        cells from /map, with no inflation, so the presentation can clearly
+        separate physical walls from the planner's safety margin.
+        """
+        if self._blocked is None or self._map_info is None:
+            return
+
+        marker = Marker()
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.header.frame_id = 'map'
+        marker.ns = 'raw_map_obstacles'
+        marker.id = 0
+        marker.type = Marker.CUBE_LIST
+        marker.action = Marker.ADD
+        marker.pose.orientation.w = 1.0
+
+        res = self._map_info.resolution
+        ox = self._map_info.origin.position.x
+        oy = self._map_info.origin.position.y
+        marker.scale.x = res
+        marker.scale.y = res
+        marker.scale.z = 0.02
+        marker.color.r = 0.0
+        marker.color.g = 0.0
+        marker.color.b = 0.0
+        marker.color.a = 1.0
+
+        rows, cols = np.where(self._blocked)
+        for row, col in zip(rows, cols):
+            point = Point()
+            point.x = float(ox + (col + 0.5) * res)
+            point.y = float(oy + (row + 0.5) * res)
+            point.z = 0.0
+            marker.points.append(point)
+
+        self._map_obstacles_pub.publish(marker)
 
     def _build_costmap(self) -> None:
         if self._blocked is None or self._map_info is None:
@@ -278,6 +331,60 @@ class AStarPlanner(Node):
         ).astype(np.int8)
         msg.data = vis.flatten().tolist()
         self._costmap_pub.publish(msg)
+        self._publish_inflation_marker()
+
+    def _publish_inflation_marker(self) -> None:
+        """Publish only the soft inflation gradient as a colored overlay.
+
+        ``/costmap`` is still the planner's truth and includes lethal inflated
+        cells.  This marker intentionally shows just finite cost cells, so RViz
+        can display the real occupancy map separately and avoid making walls
+        look physically thicker than they are.
+        """
+        if self._costmap is None or self._map_info is None:
+            return
+
+        marker = Marker()
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.header.frame_id = 'map'
+        marker.ns = 'inflation_gradient'
+        marker.id = 0
+        marker.pose.orientation.w = 1.0
+
+        grad_mask = np.isfinite(self._costmap) & (self._costmap > 1.0e-6)
+        if not grad_mask.any():
+            marker.action = Marker.DELETE
+            self._inflation_marker_pub.publish(marker)
+            return
+
+        marker.type = Marker.CUBE_LIST
+        marker.action = Marker.ADD
+        res = self._map_info.resolution
+        ox = self._map_info.origin.position.x
+        oy = self._map_info.origin.position.y
+        marker.scale.x = res
+        marker.scale.y = res
+        marker.scale.z = 0.01
+
+        rows, cols = np.where(grad_mask)
+        costs = self._costmap[rows, cols]
+        norm = np.clip(costs / _MAX_TERRAIN_COST, 0.0, 1.0)
+
+        for row, col, value in zip(rows, cols, norm):
+            point = Point()
+            point.x = float(ox + (col + 0.5) * res)
+            point.y = float(oy + (row + 0.5) * res)
+            point.z = 0.01
+            marker.points.append(point)
+
+            color = ColorRGBA()
+            color.r = 1.0
+            color.g = float(0.85 - 0.55 * value)  # yellow -> orange
+            color.b = 0.0
+            color.a = float(0.18 + 0.42 * value)
+            marker.colors.append(color)
+
+        self._inflation_marker_pub.publish(marker)
 
     # ------------------------------------------------------------------
     # Dynamic obstacle layer

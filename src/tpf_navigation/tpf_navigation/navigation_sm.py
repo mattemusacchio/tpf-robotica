@@ -65,6 +65,10 @@ class NavigationSM(Node):
         self.declare_parameter('localized_cov_thresh', _COV_DIAG_THRESH)
         self.declare_parameter('localizing_timeout_s', _LOCALIZING_TIMEOUT_S)
         self.declare_parameter('planning_timeout_s', _PLANNING_TIMEOUT_S)
+        self.declare_parameter('scan_topic', '/scan')
+        self.declare_parameter('laser_x_m', -0.032)
+        self.declare_parameter('laser_y_m', 0.0)
+        self.declare_parameter('laser_yaw_rad', 0.0)
 
         self._obs_stop_range = float(self.get_parameter('obstacle_stop_range_m').value)
         self._obs_detect_range = float(self.get_parameter('obstacle_range_m').value)
@@ -73,6 +77,10 @@ class NavigationSM(Node):
         self._cov_thresh = float(self.get_parameter('localized_cov_thresh').value)
         self._localizing_timeout = float(self.get_parameter('localizing_timeout_s').value)
         self._planning_timeout = float(self.get_parameter('planning_timeout_s').value)
+        self._scan_topic = str(self.get_parameter('scan_topic').value)
+        self._laser_x = float(self.get_parameter('laser_x_m').value)
+        self._laser_y = float(self.get_parameter('laser_y_m').value)
+        self._laser_yaw = float(self.get_parameter('laser_yaw_rad').value)
 
         self._state = State.IDLE
         self._state_entry_time: float = self.get_clock().now().nanoseconds * 1e-9
@@ -109,7 +117,7 @@ class NavigationSM(Node):
 
         self.create_subscription(PoseWithCovarianceStamped, '/pose_estimate', self._cb_pose, qos)
         self.create_subscription(String, '/nav_status', self._cb_nav_status, 10)
-        self.create_subscription(LaserScan, '/scan', self._cb_scan, qos)
+        self.create_subscription(LaserScan, self._scan_topic, self._cb_scan, qos)
         self.create_subscription(OccupancyGrid, '/map', self._cb_map, _MAP_QOS)
         self.create_subscription(PoseStamped, '/goal_pose', self._cb_goal_pose, 10)
         self.create_subscription(PoseWithCovarianceStamped, '/initialpose', self._cb_initialpose, 10)
@@ -181,11 +189,12 @@ class NavigationSM(Node):
         map_data = self._map.data
 
         rx, ry, ryaw = self._robot_x, self._robot_y, self._robot_yaw
-        # Laser mount — TurtleBot3 burger in Gazebo: x=-0.032m, no yaw offset
-        _LASER_X = -0.032
-        _LASER_YAW = 0.0
-        sx = rx + _LASER_X * math.cos(ryaw)
-        sy = ry + _LASER_X * math.sin(ryaw)
+        # Laser mount. In Gazebo this is x=-0.032m, yaw=0; on the real TB4
+        # lab robot the LiDAR has a 90 deg yaw offset. Keep this in parameters
+        # so the obstacle stop layer matches MCL/A* and does not hallucinate
+        # obstacles in the wrong direction.
+        sx = rx + self._laser_x * math.cos(ryaw) - self._laser_y * math.sin(ryaw)
+        sy = ry + self._laser_x * math.sin(ryaw) + self._laser_y * math.cos(ryaw)
 
         cells_hit_this_cb: set[tuple[int, int]] = set()
 
@@ -194,8 +203,8 @@ class NavigationSM(Node):
             if not (msg.range_min <= r <= min(msg.range_max, self._obs_detect_range)):
                 continue
 
-            wx = sx + r * math.cos(ryaw + _LASER_YAW + angle)
-            wy = sy + r * math.sin(ryaw + _LASER_YAW + angle)
+            wx = sx + r * math.cos(ryaw + self._laser_yaw + angle)
+            wy = sy + r * math.sin(ryaw + self._laser_yaw + angle)
 
             col = int((wx - map_ox) / map_res)
             row = int((wy - map_oy) / map_res)

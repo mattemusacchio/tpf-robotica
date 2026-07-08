@@ -11,7 +11,7 @@ Uso tipico:
     ros2 launch tpf_navigation part_c_real_robot.launch.py
     # luego en RViz: "2D Pose Estimate" sobre la posicion real del robot.
 
-Si el mapa del lab no es el del bag, pasar otro:
+Si el mapa del lab no es el default, pasar otro:
     ros2 launch tpf_navigation part_c_real_robot.launch.py map_yaml:=/ruta/al/mapa.yaml
 """
 
@@ -22,6 +22,7 @@ from launch.actions import DeclareLaunchArgument, TimerAction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -33,18 +34,19 @@ def generate_launch_description():
     cone_params = PathJoinSubstitution([pkg_perception, 'config', 'red_cone_detector.yaml'])
     rviz_config = PathJoinSubstitution([pkg_nav, 'rviz', 'part_b_navigation.rviz'])
 
-    default_map = os.path.abspath('log/maps/laberinto_map.yaml')
+    default_map = os.path.abspath('log/maps/labo_map_v2.yaml')
 
     map_yaml = LaunchConfiguration('map_yaml')
     robot = LaunchConfiguration('robot')
     use_rviz = LaunchConfiguration('rviz')
+    use_static_calibration = LaunchConfiguration('use_static_calibration')
 
-    # Cambiar de robot = cambiar `robot:=tb4_1`. Los remappings llevan TODO al
-    # namespace elegido (se aplican siempre, sin depender de la precedencia de
-    # parametros). Con robot:=tb4_0 quedan identidad (comportamiento por defecto).
+    # Cambiar de robot = cambiar `robot:=tb4_0` / `robot:=tb4_1`. Los remappings
+    # llevan TODO al namespace elegido (se aplican siempre, sin depender de la
+    # precedencia de parametros). Con robot:=tb4_0 quedan identidad.
     ns = ['/', robot]
-    remap_scan_ns = ('/tb4_0/scan', ns + ['/scan'])        # mcl/astar (param /tb4_0/scan)
-    remap_scan_plain = ('/scan', ns + ['/scan'])           # navigation_sm (hardcodea /scan)
+    remap_scan_ns = ('/tb4_0/scan', ns + ['/scan'])        # mcl/astar/sm param /tb4_0/scan
+    remap_scan_plain = ('/scan', ns + ['/scan'])           # compatibility with old /scan default
     remap_odom = ('/tb4_0/odom', ns + ['/odom'])
     remap_image = ('/tb4_0/oakd/rgb/preview/image_raw', ns + ['/oakd/rgb/preview/image_raw'])
     remap_caminfo = ('/tb4_0/oakd/rgb/preview/camera_info', ns + ['/oakd/rgb/preview/camera_info'])
@@ -53,10 +55,12 @@ def generate_launch_description():
     return LaunchDescription([
         # Robot real -> reloj real (NO sim time).
         DeclareLaunchArgument('map_yaml', default_value=default_map,
-                              description='Mapa del laberinto (de Parte A). Cambiar si el lab usa otro.'),
-        DeclareLaunchArgument('robot', default_value='tb4_0',
+                              description='Mapa del laboratorio (de Parte A). Cambiar si el lab usa otro.'),
+        DeclareLaunchArgument('robot', default_value='tb4_1',
                               description='Namespace del robot: tb4_0 | tb4_1 (cambia scan/odom/imagen/cmd_vel).'),
         DeclareLaunchArgument('rviz', default_value='true'),
+        DeclareLaunchArgument('use_static_calibration', default_value='false',
+                              description='false usa /camera_info real; recomendado para cambiar tb4_0/tb4_1.'),
 
         Node(
             package='nav2_map_server',
@@ -105,14 +109,18 @@ def generate_launch_description():
                 executable='navigation_sm',
                 name='navigation_sm',
                 parameters=[nav_params],
-                remappings=[remap_scan_plain, remap_cmdvel],
+                remappings=[remap_scan_ns, remap_scan_plain, remap_cmdvel],
                 output='screen',
             ),
             Node(
                 package='tpf_perception',
                 executable='red_cone_detector_node',
                 name='red_cone_detector_node',
-                parameters=[cone_params, {'use_sim_time': False}],
+                parameters=[cone_params, {
+                    'use_sim_time': False,
+                    'use_static_calibration': ParameterValue(
+                        use_static_calibration, value_type=bool),
+                }],
                 remappings=[remap_image, remap_caminfo],
                 output='screen',
             ),

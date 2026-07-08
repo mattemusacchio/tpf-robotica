@@ -24,33 +24,12 @@ Panels:
 Visualization Manager:
   Class: ""
   Displays:
-    - Alpha: 0.699999988079071
+    - Alpha: 1
       Class: rviz_default_plugins/Map
       Color Scheme: map
-      Draw Behind: false
-      Enabled: true
-      Name: Costmap
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        Filter size: 10
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /costmap
-      Update Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /costmap_updates
-      Use Timestamp: false
-      Value: true
-    - Alpha: 0.699999988079071
-      Class: rviz_default_plugins/Map
-      Color Scheme: costmap
       Draw Behind: true
       Enabled: true
-      Name: Map
+      Name: Mapa real sin inflación
       Topic:
         Depth: 5
         Durability Policy: Transient Local
@@ -65,6 +44,53 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /map_updates
       Use Timestamp: false
+      Value: true
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: Mapa real obstaculos
+      Namespaces:
+        raw_map_obstacles: true
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /map_obstacles
+      Value: true
+    - Alpha: 0.25
+      Class: rviz_default_plugins/Map
+      Color Scheme: costmap
+      Draw Behind: false
+      Enabled: false
+      Name: Costmap crudo debug
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /costmap
+      Update Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /costmap_updates
+      Use Timestamp: false
+      Value: false
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: Inflación de seguridad
+      Namespaces:
+        inflation_gradient: true
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /inflation_gradient
       Value: true
     - Alpha: 0.5
       Autocompute Intensity Bounds: true
